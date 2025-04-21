@@ -1,0 +1,2 @@
+# Ignore the production configuration file with secrets, credentials, certs, etc.
+config.h
