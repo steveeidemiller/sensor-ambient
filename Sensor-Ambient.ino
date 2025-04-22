@@ -21,6 +21,10 @@
 //TODO: Add remote IP restrictions as an array of IP's for NGINX. Can the web server abort a connection?
 //TODO: Allow MQTT to be done without cert and without user/pass, allow MQTT private key auth via define switch with client cert+key, update HTML page with mqtt:// or mqtts://
 
+//TODO: show stuff on the TFT display
+//TODO: turn display on for a few seconds when a button is pressed
+//TODO: read vBus power on/off with resister divider and digital pin
+
 // Libraries
 #include <Arduino.h>
 #include <Wire.h>
@@ -60,6 +64,7 @@ char mqttStringBuffer[20];
 //char tftStringBuffer[20];
 Adafruit_ST7789 display = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(TFT_SCREEN_WIDTH, TFT_SCREEN_HEIGHT);
+int64_t displayTimer; // Timestamp of the last button press used to turn on the display
 
 // BME280 configuration
 Adafruit_BME280 bme280;
@@ -73,7 +78,7 @@ float environmentPressure;
 SemaphoreHandle_t xMutexUptime; // Mutex to protect shared variables between tasks
 int64_t uptimeSecondsTotal, uptimeDays, uptimeHours, uptimeMinutes, uptimeSeconds;
 int64_t lastUptimeSecondsTotal = 0;
-char stringBufferUptime[24];
+char uptimeStringBuffer[24];
 
 // LiPo battery
 SemaphoreHandle_t xMutexBattery; // Mutex to protect shared variables between tasks
@@ -83,16 +88,22 @@ float batteryVoltage;
 // SPH0645 I2S sound sensor
 SemaphoreHandle_t xMutexSoundSensor; // Mutex to protect shared variables between tasks
 int32_t soundSensorDataBuffer[I2S_DMA_BUF_LEN]; // I2S read buffer
-float soundSensorSplAverage = 0; // Average sound level in dB SPL
-float soundSensorSplPeak = 0; // Peak sound level in dB SPL
+float soundSensorSpl = 0; // Current sound level in dB
+float soundSensorSplAverage = 0; // Average sound level in dB, calculated using an Exponential Moving Average (EMA) over the measurement window
+float soundSensorSplPeak = 0; // Peak sound level in dB, within the measurement window
+float soundSensorPeakLevels[MEASUREMENT_WINDOW];
+int soundSensorLastTimeIndex = 0; // Last time index into soundSensorPeakLevels[] for tracking peak sound levels during each second
 
 // VML7700 light sensor
 Adafruit_VEML7700 lightSensor = Adafruit_VEML7700();
 SemaphoreHandle_t xMutexLightSensor; // Mutex to protect shared variables between tasks
-float lightSensorLuxAverage = 0; // Average light level in Lux
-float lightSensorLuxPeak = 0; // Peak light level in Lux
-float lightSensorGain = VEML7700_GAIN_1X; // Gain setting for the light sensor, read/updated from the AGC
-int lightSensorIntegrationTime = VEML7700_IT_100MS; // Integration time setting for the light sensor, read/updated from the AGC
+float lightSensorLux = 0; // Current light level in lux
+float lightSensorLuxAverage = 0; // Average light level in lux, calculated using an Exponential Moving Average (EMA) over the measurement window
+float lightSensorLuxPeak = 0; // Peak light level in lux, within the measurement window
+float lightSensorGain = VEML7700_GAIN_1; // Current gain setting for the light sensor, read/updated from the AGC
+int lightSensorIntegrationTime = VEML7700_IT_100MS; // Current integration time setting for the light sensor, read/updated from the AGC
+float lightSensorPeakLevels[MEASUREMENT_WINDOW]; // Track max light levels for each second
+int lightSensorLastTimeIndex = 0; // Last time index into lightSensorPeakLevels[] for tracking peak light levels during each second
 
 // Main loop
 uint64_t lastUpdateTimeMqtt = 0; // Time of last MQTT update
@@ -134,11 +145,14 @@ const char htmlHeader[] = R"EOF(
         padding-left: 50px;
         text-align: right;
       }
+      table.sensor tr.light {
+        background-color: #E8E8FF;
+      }
       table.sensor tr.environmental {
-        background-color: #E0E0FF;
+        background-color: #D0D0FF;
       }
       table.sensor tr.system {
-        background-color: #C0C0FF;
+        background-color: #B8B8FF;
       }
       table.sensor tr.chip {
         background-color: #A0A0FF;
@@ -228,14 +242,16 @@ void webHandlerRoot()
   buffer += buffercat(buffer, "<table class=\"sensor\" cellspacing=\"0\" cellpadding=\"3\">"); // Sensor data table
   buffer += bytesAdded(sprintf(buffer, "<tr><th colspan=\"2\" class=\"header\">%s</th></tr>", WIFI_HOSTNAME)); // Network hostname
   xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
+  buffer += bytesAdded(sprintf(buffer, "<tr><th>Sound Pressure Level (current)</th><td>%0.2f dB</td></tr>", soundSensorSpl)); // Current sound level in dB
   buffer += bytesAdded(sprintf(buffer, "<tr><th>Sound Pressure Level (average)</th><td>%0.2f dB</td></tr>", soundSensorSplAverage)); // Average sound level in dB
   buffer += bytesAdded(sprintf(buffer, "<tr><th>Sound Pressure Level (peak)</th><td>%0.2f dB</td></tr>", soundSensorSplPeak)); // Peak sound level in dB
   xSemaphoreGive(xMutexSoundSensor); // Done with sound data
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
-  buffer += bytesAdded(sprintf(buffer, "<tr><th>Light Level (average)</th><td>%0.2f lux</td></tr>", lightSensorLuxAverage)); // Average light level in lux
-  buffer += bytesAdded(sprintf(buffer, "<tr><th>Light Level (peak)</th><td>%0.2f lux</td></tr>", lightSensorLuxPeak)); // Peak light level in lux
-  buffer += bytesAdded(sprintf(buffer, "<tr><th>Light Measurement Gain</th><td>%0.3f</td></tr>", lightSensorGain)); // Measurement gain
-  buffer += bytesAdded(sprintf(buffer, "<tr><th>Light Measurement Integration Time</th><td>%d</td></tr>", lightSensorIntegrationTime)); // Measurement integration time
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Level (current)</th><td>%0.2f lux</td></tr>", lightSensorLux)); // Current light level in lux
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Level (average)</th><td>%0.2f lux</td></tr>", lightSensorLuxAverage)); // Average light level in lux
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Level (peak)</th><td>%0.2f lux</td></tr>", lightSensorLuxPeak)); // Peak light level in lux
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Measurement Gain</th><td>%0.3f</td></tr>", lightSensorGain)); // Current lux measurement gain
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Measurement Integration Time</th><td>%d ms</td></tr>", lightSensorIntegrationTime)); // Current measurement integration time
   xSemaphoreGive(xMutexLightSensor); // Done with light data
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Sensor OK?</th><td>%d</td></tr>", (int)environmentSensorOK)); // Environment sensor OK?
@@ -248,8 +264,9 @@ void webHandlerRoot()
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Barometric Pressure</th><td>%0.1f mbar</td></tr>", environmentPressure)); // Environment barometric pressure
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime</th><td>%s</td></tr>", stringBufferUptime)); // Formatted uptime
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime Seconds</th><td>%lld</td></tr>", uptimeSecondsTotal)); // Raw uptime in seconds
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Measurement Window</th><td>%d seconds</td></tr>", MEASUREMENT_WINDOW)); // Formatted uptime
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime</th><td>%s</td></tr>", uptimeStringBuffer)); // Formatted uptime
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime Seconds</th><td>%lld seconds</td></tr>", uptimeSecondsTotal)); // Raw uptime in seconds
   xSemaphoreGive(xMutexUptime); // Done with uptime data
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Free Heap</th><td>%d bytes</td></tr>", ESP.getFreeHeap())); // ESP32 free heap memory, which indicates if the program still has enough memory to run effectively
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
@@ -393,22 +410,20 @@ void mqttConnect()
   }
 }
 
-// TFT ST7789 display setup
+// Setup the TFT ST7789 display
 void setupTFT()
 {
   // Initialize the display
-  Serial.println("TFT: Configuring display");
+  Serial.println("TFT: Configuring ST7789");
   pinMode(TFT_I2C_POWER, OUTPUT);
   digitalWrite(TFT_I2C_POWER, HIGH);
   display.init(TFT_SCREEN_HEIGHT, TFT_SCREEN_WIDTH);
+  display.setRotation(3);
   
-  // Setup defaults
+  // Establish defaults
   display.setRotation(3);
   canvas.setFont(&FreeSans12pt7b);
   canvas.setTextColor(ST77XX_WHITE); // White text
-
-  // Allow the display time to initialize after powering on
-  delay(100);
 }
 
 // Update the TFT display
@@ -436,7 +451,7 @@ void updateDisplay(float temperature, float humidity, float pressure, float batt
   if (uptimeSeconds % 2)
   {
     // Show the system uptime in days/hours/minutes/seconds format
-    sprintf(oledStringBuffer, "%s", stringBufferUptime);
+    sprintf(oledStringBuffer, "%s", uptimeStringBuffer);
   }
   else
   {
@@ -479,15 +494,14 @@ void updateDisplay(float temperature, float humidity, float pressure, float batt
 // Setup the environmental sensor
 void setupEnvironmentalSensor()
 {
-  Serial.println("BME280: Initializing");
-  delay(100); // Allow the sensor time to initialize after powering on
+  Serial.println("Environmentals: Initializing BME280");
   if (!bme280.begin(BME280_ADDRESS))
   {
-    Serial.println("BME280: Configuration failed");
+    Serial.println("Environmentals: BME280 configuration failed");
   }
 }
 
-// Environmental data measurement
+// Environmental data measurement using the BME280 sensor
 void measureEnvironmentals()
 {
   float t, h, p;
@@ -507,7 +521,7 @@ void measureEnvironmentals()
     if (isnanf(t) || isnanf(h) || isnanf(p))
     {
       // Reset the BME280
-      Serial.println("BME280: NaN detected - Resetting sensor");
+      Serial.println("Environmentals: NaN detected - Resetting BME280");
       setupEnvironmentalSensor();
       xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
       environmentSensorOK = false;
@@ -526,10 +540,10 @@ void measureEnvironmentals()
       }
       else
       {
-        // Smooth values with a 20-sample moving average
-        environmentTemperature = (environmentTemperature * 19 + t) / 20;
-        environmentHumidity = (environmentHumidity * 19 + h) / 20;
-        environmentPressure = (environmentPressure * 19 + p) / 20;
+        // Smooth values with an EMA moving average
+        environmentTemperature = (environmentTemperature * (MEASUREMENT_WINDOW - 1) + t) / MEASUREMENT_WINDOW;
+        environmentHumidity = (environmentHumidity * (MEASUREMENT_WINDOW - 1) + h) / MEASUREMENT_WINDOW;
+        environmentPressure = (environmentPressure * (MEASUREMENT_WINDOW - 1) + p) / MEASUREMENT_WINDOW;
       }
       environmentSensorOK = true;
       xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
@@ -538,7 +552,7 @@ void measureEnvironmentals()
   else
   {
     // Reset the BME280
-    Serial.printf("BME280 data error: t=%0.1f h=%0.1f p=%0.1f", t, h, p); Serial.println();
+    Serial.printf("Environmentals: BME280 data error: t=%0.1f h=%0.1f p=%0.1f", t, h, p); Serial.println();
     setupEnvironmentalSensor();
     xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
     environmentSensorOK = false;
@@ -546,7 +560,23 @@ void measureEnvironmentals()
   }
 }
 
-// Light level measurement (background task)
+// Setup the VEML7700 light sensor
+void setupLightSensor()
+{
+  Serial.println("Light: Configuring VEML7700");
+
+  // Initialize the VEML7700 light sensor
+  if (!lightSensor.begin())
+  {
+    Serial.println("Light: Configuration failed");
+    //while (1); // Halt execution
+  }
+  //lightSensor.setIntegrationTime(VEML7700_IT_100MS); // Set integration time to 100ms
+  //lightSensor.setGain(VEML7700_GAIN_1X); // Set gain to 1x
+  //lightSensor.setPower(VEML7700_POWER_ON); // Power on the sensor
+}
+
+// Light level measurement using the VEML7700 sensor
 // Reference: https://github.com/adafruit/Adafruit_VEML7700/blob/master/examples/veml7700_autolux/veml7700_autolux.ino
 void measureLight()
 {
@@ -574,36 +604,95 @@ void measureLight()
     case VEML7700_IT_800MS: integrationTime = 800; break;
   }
 
+  // Track peak levels
+  unsigned long timeIndex = (millis() / 1000) % MEASUREMENT_WINDOW; // The time index rotates through the measurement window at the rate of one slot per second
+  if (timeIndex != lightSensorLastTimeIndex)
+  {
+    // A new second/slot
+    lightSensorLastTimeIndex = timeIndex;
+    lightSensorPeakLevels[timeIndex] = lux; // Initial value for the current second
+  }
+  else
+  {
+    // Subsequent measurement during the same second/slot as the previous measurement
+    lightSensorPeakLevels[timeIndex] = max(lightSensorPeakLevels[timeIndex], lux);
+  }
+  float peakLux = 0;
+  for (int i = 0; i < MEASUREMENT_WINDOW; i++)
+  {
+    peakLux = max(peakLux, lightSensorPeakLevels[i]);
+  }
+
   // Update light sensor data values
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data
-  lightSensorLuxAverage = (lightSensorLuxAverage * 19 + lux) / 20; // 20-sample moving average to smooth the lux reading
-  //lightSensorLuxPeak = max(lux, lightSensorLuxPeak); // Peak lux value
+  lightSensorLux = lux; // Current lux value
+  if (lightSensorLuxAverage == 0)
+  {
+    // Initialize values
+    lightSensorLuxAverage = lux;
+  }
+  else
+  {
+    // EMA moving average to smooth the lux reading
+    lightSensorLuxAverage = (lightSensorLuxAverage * (MEASUREMENT_WINDOW - 1) + lux) / MEASUREMENT_WINDOW;
+  }
+  lightSensorLuxPeak = peakLux;
   lightSensorGain = gain;
   lightSensorIntegrationTime = integrationTime;
   xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
+}
+
+// Setup the MAX17048 LiPo battery monitor
+void setupBatteryMonitor()
+{
+  Serial.println("Battery: Configuring MAX17048");
+
+  // Initialize the MAX17048 battery monitor
+  if (!max17048.begin())
+  {
+    Serial.println("Battery: Configuration failed");
+    //while (1); // Halt execution
+  }
 }
 
 // Read the battery voltage using the MAX17048 LiPo battery monitor
 void measureBattery()
 {
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data
-  batteryVoltage = (batteryVoltage * 19 + max17048.cellVoltage()) / 20; // 20-sample moving average to smooth the voltage reading
+  float v = max17048.cellVoltage();
+  if (batteryVoltage == 0)
+  {
+    // Initialize values
+    batteryVoltage = v;
+  }
+  else
+  {
+    // EMA moving average to smooth the voltage reading
+    batteryVoltage = (batteryVoltage * (MEASUREMENT_WINDOW - 1) + v) / MEASUREMENT_WINDOW;
+  }
   xSemaphoreGive(xMutexBattery); // Done with battery data
 }
 
 // Read all I2C devices in sequence (background task)
 void readI2CDevices(void *parameter)
 {
+  unsigned long timer;
+
   // Infinite loop since this is a separate task from the main thread
   while (true)
   {
     // Read the I2C devices in sequence
+    timer = millis();
     measureEnvironmentals(); // Read the BME280 sensor data
     measureLight(); // Measure the light level
     measureBattery(); // Read the LiPo battery voltage
+    timer = millis() - timer; // Elapsed time in ms, which seems to be around 711 ms
 
-    // Non-blocking delay on ESP32, in milliseconds
-    delay(950);
+    // Only read the I2C devices approximately every second. Nothing more than that is really needed.
+    if (timer < 950)
+    {
+      delay(950 - timer); // Non-blocking delay on ESP32, in milliseconds
+    }
   }
 }
 
@@ -656,7 +745,6 @@ void setupSoundSensor()
 }
 
 // Sound level measurement using I2S (background task)
-//TODO: semaphore, 20 period EMA on sound level, etc.
 void measureSound(void *parameter)
 {
   // Infinite loop since this is a separate task from the main thread
@@ -679,7 +767,7 @@ void measureSound(void *parameter)
         for (int i = 0; i < samplesRead; i++)
         {
           // SPH0645 data is in the upper 18 bits of the 32-bit sample
-          // NOTE: The 32-bit sample is unsigned, which MUST be cast to unsigned before shifting bits to avoid the sign bit carrying over to the upper bits
+          // NOTE: The 32-bit sample is unsigned, which MUST be cast to unsigned before shifting bits to avoid the sign bit potentially carrying over to the upper bits
           int32_t s = ((unsigned int)soundSensorDataBuffer[i]) >> (32 - 18);
 
           // Calculate the rage of the samples
@@ -693,11 +781,40 @@ void measureSound(void *parameter)
         // Rough calculation of the sound pressure level (SPL) in dB based on the measured range of the samples
         float spl = SPL_FACTOR * log10(maxValue - minValue);
 
+        // Track peak levels
+        unsigned long timeIndex = (millis() / 1000) % MEASUREMENT_WINDOW; // The time index rotates through the measurement window at the rate of one slot per second
+        if (timeIndex != soundSensorLastTimeIndex)
+        {
+          // A new second/slot
+          soundSensorLastTimeIndex = timeIndex;
+          soundSensorPeakLevels[timeIndex] = spl; // Initial value for the current second
+        }
+        else
+        {
+          // Subsequent measurement during the same second/slot as the previous measurement
+          soundSensorPeakLevels[timeIndex] = max(soundSensorPeakLevels[timeIndex], spl);
+        }
+        float peakSpl = 0;
+        for (int i = 0; i < MEASUREMENT_WINDOW; i++)
+        {
+          peakSpl = max(peakSpl, soundSensorPeakLevels[i]);
+        }
+
         // Update the sound level values
         xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data
-        soundSensorSplAverage = (soundSensorSplAverage * 19 + spl) / 20; // 20-sample moving average to smooth the SPL reading
-        //soundSensorSplPeak = max(spl, soundSensorSplPeak); // Peak SPL value
-        xsemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
+        soundSensorSpl = spl; // Current SPL value
+        if (soundSensorSplAverage == 0)
+        {
+          // Initialize values
+          soundSensorSplAverage = spl;
+        }
+        else
+        {
+          // EMA moving average to smooth the SPL reading
+          soundSensorSplAverage = (soundSensorSplAverage * (MEASUREMENT_WINDOW - 1) + spl) / MEASUREMENT_WINDOW;
+        }
+        soundSensorSplPeak = peakSpl; // Peak SPL value
+        xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
       }
     }
 
@@ -717,15 +834,25 @@ void setup()
   setupMDNS();
   setupWebserver();
   setupMQTT();
+
+  // Sensor setup
+  delay(200); // Allow the sensor modules time to initialize after powering on
   setupTFT();
   setupEnvironmentalSensor();
-  max17048.begin();
-  lightSensor.begin();
+  setupBatteryMonitor();
+  setupSoundSensor();
+  setupLightSensor();
   xMutexEnvironmental = xSemaphoreCreateMutex();
   xMutexUptime        = xSemaphoreCreateMutex();
   xMutexBattery       = xSemaphoreCreateMutex();
   xMutexSoundSensor   = xSemaphoreCreateMutex();
   xMutexLightSensor   = xSemaphoreCreateMutex();
+
+  // Button setup
+  // Reference: https://learn.adafruit.com/esp32-s3-reverse-tft-feather/factory-shipped-demo-2
+  pinMode(0, INPUT_PULLUP); // D0 is different
+  pinMode(1, INPUT_PULLDOWN);
+  pinMode(2, INPUT_PULLDOWN);
 
   // Chip information
   sprintf(chipInformation, "%s %s (revison v%d.%d), %dMHz", ESP.getChipModel(), ESP.getCoreVersion(), efuse_hal_get_major_chip_version(), efuse_hal_get_minor_chip_version(), ESP.getCpuFreqMHz());
@@ -781,11 +908,19 @@ void loop()
     seconds -= uptimeHours * 3600;
     uptimeMinutes = seconds / 60;
     uptimeSeconds = seconds - uptimeMinutes * 60;
-    sprintf(stringBufferUptime, "%lldd %lldh %lldm %llds", uptimeDays, uptimeHours, uptimeMinutes, uptimeSeconds);
+    sprintf(uptimeStringBuffer, "%lldd %lldh %lldm %llds", uptimeDays, uptimeHours, uptimeMinutes, uptimeSeconds);
     lastUptimeSecondsTotal = uptimeSecondsTotal;
   }
   timer = uptimeSecondsTotal; // Copy the timer so it can be used without the semaphore
   xSemaphoreGive(xMutexUptime); // Done with uptime data
+
+  // Turn on the TFT display for a few seconds when a button is pressed
+  bool buttonPressed = false;
+  if (digitalRead(0) == 0 || digitalRead(1) || digitalRead(1)) // NOTE: D0 is different
+  {
+    buttonPressed = true;
+    displayTimer = timer;
+  }
 
   // Update outputs every specified update interval, and the first-time through the loop
   bool updateMqtt = timer - lastUpdateTimeMqtt >= UPDATE_INTERVAL_MQTT;
@@ -818,12 +953,16 @@ void loop()
       lastUpdateTimeMqtt = timer;
 
       // Send sound level information to MQTT
+      sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSpl);
+      mqttClient.publish(MQTT_TOPIC_SPL, mqttStringBuffer, true);
       sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSplAverage);
       mqttClient.publish(MQTT_TOPIC_SPL_AVERAGE, mqttStringBuffer, true);
       sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSplPeak);
       mqttClient.publish(MQTT_TOPIC_SPL_PEAK, mqttStringBuffer, true);
 
       // Send light level information to MQTT
+      sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLux);
+      mqttClient.publish(MQTT_TOPIC_LUX, mqttStringBuffer, true);
       sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLuxAverage);
       mqttClient.publish(MQTT_TOPIC_LUX_AVERAGE, mqttStringBuffer, true);
       sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLuxPeak);
@@ -832,13 +971,6 @@ void loop()
       mqttClient.publish(MQTT_TOPIC_LUX_GAIN, mqttStringBuffer, true);
       sprintf(mqttStringBuffer, "%d ms", lightSensorIntegrationTime);
       mqttClient.publish(MQTT_TOPIC_LUX_INTEGRATION_TIME, mqttStringBuffer, true);
-
-      // Send uptime information to MQTT
-      xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
-      mqttClient.publish(MQTT_TOPIC_UPTIME, stringBufferUptime, true);
-      sprintf(mqttStringBuffer, "%lld", timer);
-      mqttClient.publish(MQTT_TOPIC_UPTIME_SECONDS, mqttStringBuffer, true);
-      xSemaphoreGive(xMutexUptime); // Done with uptime data
 
       // Send the environmentals to MQTT
       if (environmentOK)
@@ -854,6 +986,17 @@ void loop()
         sprintf(mqttStringBuffer, "%0.1f mbar", pressure);
         mqttClient.publish(MQTT_TOPIC_PRESSURE, mqttStringBuffer, true);
       }
+
+      // Send the measurement window size to MQTT
+      sprintf(mqttStringBuffer, "%d seconds", MEASUREMENT_WINDOW);
+      mqttClient.publish(MQTT_TOPIC_MEASUREMENT_WINDOW, mqttStringBuffer, true);
+
+      // Send uptime information to MQTT
+      xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
+      mqttClient.publish(MQTT_TOPIC_UPTIME, uptimeStringBuffer, true);
+      sprintf(mqttStringBuffer, "%lld", timer);
+      mqttClient.publish(MQTT_TOPIC_UPTIME_SECONDS, mqttStringBuffer, true);
+      xSemaphoreGive(xMutexUptime); // Done with uptime data
 
       // Send free heap size to MQTT
       sprintf(mqttStringBuffer, "%d", ESP.getFreeHeap());
