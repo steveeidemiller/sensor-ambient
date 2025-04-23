@@ -19,7 +19,8 @@ IPAddress webAllowedClients[] = {
 // TFT display configuration
 #define TFT_SCREEN_WIDTH  240
 #define TFT_SCREEN_HEIGHT 135
-#define TFT_TIMEOUT       8    // After a button press, the display will be powered on for this many seconds before auto-shutoff
+#define TFT_TIMEOUT       30    // After a button press, the display will be powered on for this many seconds before auto-shutoff
+#define TFT_ROTATION      0     // 0 = 0, 1 = 90, 2 = 180, 3 = 270. Reference: https://learn.adafruit.com/adafruit-gfx-graphics-library/rotating-the-display
 
 // BME280 configuration
 #define BME280_ADDRESS 0x77
@@ -39,6 +40,9 @@ IPAddress webAllowedClients[] = {
 #define I2S_NUM_CHANNELS    I2S_CHANNEL_FMT_ONLY_LEFT // SPH0645 is mono, usually on the left channel
 #define SPL_FACTOR          17.5 // Factor to convert the range of the samples to dB SPL (Sound Pressure Level) using the formula: SPL = FACTOR * log10(max - min), where max and min are the maximum and minimum sample values, respectively
 
+// AC power sensing pin
+#define AC_POWER_PIN 10 // Attached to the center of the 5V/3.3V resister divider such that the pin gets 3.3V when 5V power exists on the USB bus
+
 // General measurement configuration
 #define MEASUREMENT_WINDOW 60 // Measurements will be averaged with an EMA over this period. It should be similar to the expected Prometheus scrape interval, in seconds.
 
@@ -52,23 +56,6 @@ const int   MQTT_PORT     = 8883;           // 1883 is the default port for MQTT
 const char* MQTT_USER     = "MQTT user";    // Null if no authentication is required
 const char* MQTT_PASSWORD = "MQTT pass";    // Null if no authentication is required
 #define     MQTT_TOPIC_BASE  "home/sensors/ambient_upper_attic/"                       // Base topic string for all values from this sensor
-const char* MQTT_TOPIC_SPL                  = MQTT_TOPIC_BASE "spl";                   // Current sound level in dB
-const char* MQTT_TOPIC_SPL_AVERAGE          = MQTT_TOPIC_BASE "spl_average";           // Average sound level in dB
-const char* MQTT_TOPIC_SPL_PEAK             = MQTT_TOPIC_BASE "spl_peak";              // Peak sound level in dB
-const char* MQTT_TOPIC_LUX                  = MQTT_TOPIC_BASE "lux";                   // Current light level in Lux
-const char* MQTT_TOPIC_LUX_AVERAGE          = MQTT_TOPIC_BASE "lux_average";           // Average light level in Lux
-const char* MQTT_TOPIC_LUX_PEAK             = MQTT_TOPIC_BASE "lux_peak";              // Peak light level in Lux
-const char* MQTT_TOPIC_LUX_GAIN             = MQTT_TOPIC_BASE "lux_measurement_gain";              // Current light sensor gain setting
-const char* MQTT_TOPIC_LUX_INTEGRATION_TIME = MQTT_TOPIC_BASE "lux_measurement_integration_time";  // Current light sensor integration time (in ms)
-const char* MQTT_TOPIC_MEASUREMENT_WINDOW   = MQTT_TOPIC_BASE "measurement_window";    // Measurement window size in seconds
-const char* MQTT_TOPIC_UPTIME               = MQTT_TOPIC_BASE "uptime";                // Uptime
-const char* MQTT_TOPIC_UPTIME_SECONDS       = MQTT_TOPIC_BASE "uptime_seconds";        // Total uptime in seconds
-const char* MQTT_TOPIC_TEMPERATURE          = MQTT_TOPIC_BASE "environmental_temperature";
-const char* MQTT_TOPIC_HUMIDITY             = MQTT_TOPIC_BASE "environmental_humidity";
-const char* MQTT_TOPIC_PRESSURE             = MQTT_TOPIC_BASE "environmental_pressure";
-const char* MQTT_TOPIC_FREE_HEAP            = MQTT_TOPIC_BASE "esp32_free_heap_bytes";  // Current ESP32 free heap size in bytes
-const char* MQTT_TOPIC_BATTERY_VOLTAGE      = MQTT_TOPIC_BASE "esp32_battery_voltage";  // LiPo voltage
-const char* MQTT_TOPIC_CHIP_INFO            = MQTT_TOPIC_BASE "esp32_chip_information"; // Info about the ESP32
 
 // Certificate Authority for TLS connections
 static const char CERT_CA[] = R"EOF(

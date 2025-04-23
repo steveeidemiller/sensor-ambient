@@ -21,9 +21,9 @@
 //TODO: Add remote IP restrictions as an array of IP's for NGINX. Can the web server abort a connection?
 //TODO: Allow MQTT to be done without cert and without user/pass, allow MQTT private key auth via define switch with client cert+key, update HTML page with mqtt:// or mqtts://
 
-//TODO: show stuff on the TFT display
-//TODO: turn display on for a few seconds when a button is pressed
-//TODO: read vBus power on/off with resister divider and digital pin
+//TODO: handle large lux values on TFT display logic
+//TODO: refactor "TFT" stuff to "display"
+//TODO: implement metrics
 
 // Libraries
 #include <Arduino.h>
@@ -37,14 +37,35 @@
 #include <Adafruit_MAX1704X.h>    // LiPo battery support
 #include <Adafruit_VEML7700.h>    // VEML7700 ambient light sensor support
 #include <Adafruit_ST7789.h>      // TFT display support
-#include <Fonts/FreeSans12pt7b.h> // TFT display support
 #include <Fonts/FreeSans9pt7b.h>  // TFT display support
+//#include <Fonts/FreeSans12pt7b.h> // TFT display support
 #include <Adafruit_Sensor.h>      // BME280 support
 #include <Adafruit_BME280.h>      // BME280 support
 #include <hal/efuse_hal.h>        // Espressif ESP32 chip information
 
 // The configuration references objects in the above libraries, so include it after those
 #include <config.h>
+
+// MQTT topics
+const char* MQTT_TOPIC_SPL                  = MQTT_TOPIC_BASE "spl";                   // Current sound level in dB
+const char* MQTT_TOPIC_SPL_AVERAGE          = MQTT_TOPIC_BASE "spl_average";           // Average sound level in dB
+const char* MQTT_TOPIC_SPL_PEAK             = MQTT_TOPIC_BASE "spl_peak";              // Peak sound level in dB
+const char* MQTT_TOPIC_LUX                  = MQTT_TOPIC_BASE "lux";                   // Current light level in Lux
+const char* MQTT_TOPIC_LUX_AVERAGE          = MQTT_TOPIC_BASE "lux_average";           // Average light level in Lux
+const char* MQTT_TOPIC_LUX_PEAK             = MQTT_TOPIC_BASE "lux_peak";              // Peak light level in Lux
+const char* MQTT_TOPIC_LUX_GAIN             = MQTT_TOPIC_BASE "lux_measurement_gain";              // Current light sensor gain setting
+const char* MQTT_TOPIC_LUX_INTEGRATION_TIME = MQTT_TOPIC_BASE "lux_measurement_integration_time";  // Current light sensor integration time (in ms)
+const char* MQTT_TOPIC_MEASUREMENT_WINDOW   = MQTT_TOPIC_BASE "measurement_window";    // Measurement window size in seconds
+const char* MQTT_TOPIC_UPTIME_DETAIL        = MQTT_TOPIC_BASE "uptime_detail";         // Formatted uptime
+const char* MQTT_TOPIC_UPTIME               = MQTT_TOPIC_BASE "uptime";                // Total uptime in seconds
+const char* MQTT_TOPIC_TEMPERATURE          = MQTT_TOPIC_BASE "environmental_temperature";
+const char* MQTT_TOPIC_HUMIDITY             = MQTT_TOPIC_BASE "environmental_humidity";
+const char* MQTT_TOPIC_PRESSURE             = MQTT_TOPIC_BASE "environmental_pressure";
+const char* MQTT_TOPIC_FREE_HEAP            = MQTT_TOPIC_BASE "esp32_free_heap_bytes";  // Current ESP32 free heap size in bytes
+const char* MQTT_TOPIC_BATTERY_VOLTAGE      = MQTT_TOPIC_BASE "esp32_battery_voltage";  // LiPo voltage
+const char* MQTT_TOPIC_BATTERY_PERCENT      = MQTT_TOPIC_BASE "esp32_battery_percent";  // LiPo percent charged
+const char* MQTT_TOPIC_AC_POWER_STATE       = MQTT_TOPIC_BASE "esp32_ac_power_state";   // ON or OFF depending on whether 5V power is available on the USB bus
+const char* MQTT_TOPIC_CHIP_INFO            = MQTT_TOPIC_BASE "esp32_chip_information"; // Info about the ESP32
 
 // ESP32
 char chipInformation[100]; // Chip information buffer
@@ -64,7 +85,7 @@ char mqttStringBuffer[20];
 //char tftStringBuffer[20];
 Adafruit_ST7789 display = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(TFT_SCREEN_WIDTH, TFT_SCREEN_HEIGHT);
-int64_t displayTimer; // Timestamp of the last button press used to turn on the display
+int64_t displayTimer = 0; // Timestamp of the last button press used to turn on the display
 
 // BME280 configuration
 Adafruit_BME280 bme280;
@@ -80,10 +101,12 @@ int64_t uptimeSecondsTotal, uptimeDays, uptimeHours, uptimeMinutes, uptimeSecond
 int64_t lastUptimeSecondsTotal = 0;
 char uptimeStringBuffer[24];
 
-// LiPo battery
+// LiPo battery and AC power state
 SemaphoreHandle_t xMutexBattery; // Mutex to protect shared variables between tasks
 Adafruit_MAX17048 max17048;
 float batteryVoltage;
+float batteryPercent;
+int acPowerState; // Is set to 1 when 5V is present on the USB bus (AC power is on), and 0 when not (AC power is off)
 
 // SPH0645 I2S sound sensor
 SemaphoreHandle_t xMutexSoundSensor; // Mutex to protect shared variables between tasks
@@ -241,11 +264,13 @@ void webHandlerRoot()
   buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME)); // Hostname gets added to the HTML <title> inside the template header
   buffer += buffercat(buffer, "<table class=\"sensor\" cellspacing=\"0\" cellpadding=\"3\">"); // Sensor data table
   buffer += bytesAdded(sprintf(buffer, "<tr><th colspan=\"2\" class=\"header\">%s</th></tr>", WIFI_HOSTNAME)); // Network hostname
+
   xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
   buffer += bytesAdded(sprintf(buffer, "<tr><th>Sound Pressure Level (current)</th><td>%0.2f dB</td></tr>", soundSensorSpl)); // Current sound level in dB
   buffer += bytesAdded(sprintf(buffer, "<tr><th>Sound Pressure Level (average)</th><td>%0.2f dB</td></tr>", soundSensorSplAverage)); // Average sound level in dB
   buffer += bytesAdded(sprintf(buffer, "<tr><th>Sound Pressure Level (peak)</th><td>%0.2f dB</td></tr>", soundSensorSplPeak)); // Peak sound level in dB
   xSemaphoreGive(xMutexSoundSensor); // Done with sound data
+
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Level (current)</th><td>%0.2f lux</td></tr>", lightSensorLux)); // Current light level in lux
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Level (average)</th><td>%0.2f lux</td></tr>", lightSensorLuxAverage)); // Average light level in lux
@@ -253,6 +278,7 @@ void webHandlerRoot()
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Measurement Gain</th><td>%0.3f</td></tr>", lightSensorGain)); // Current lux measurement gain
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"light\"><th>Light Measurement Integration Time</th><td>%d ms</td></tr>", lightSensorIntegrationTime)); // Current measurement integration time
   xSemaphoreGive(xMutexLightSensor); // Done with light data
+
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Sensor OK?</th><td>%d</td></tr>", (int)environmentSensorOK)); // Environment sensor OK?
   #if defined(BME280_TEMP_F)
@@ -263,15 +289,20 @@ void webHandlerRoot()
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Humidity</th><td>%0.1f%%</td></tr>", environmentHumidity)); // Environment humidiy
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Barometric Pressure</th><td>%0.1f mbar</td></tr>", environmentPressure)); // Environment barometric pressure
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Measurement Window</th><td>%d seconds</td></tr>", MEASUREMENT_WINDOW)); // Formatted uptime
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime</th><td>%s</td></tr>", uptimeStringBuffer)); // Formatted uptime
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime Seconds</th><td>%lld seconds</td></tr>", uptimeSecondsTotal)); // Raw uptime in seconds
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime</th><td>%lld seconds</td></tr>", uptimeSecondsTotal)); // Raw uptime in seconds
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime Detail</th><td>%s</td></tr>", uptimeStringBuffer)); // Formatted uptime
   xSemaphoreGive(xMutexUptime); // Done with uptime data
+
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Free Heap</th><td>%d bytes</td></tr>", ESP.getFreeHeap())); // ESP32 free heap memory, which indicates if the program still has enough memory to run effectively
+
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Battery Voltage</th><td>%0.2f V</td></tr>", batteryVoltage)); // LiPo battery
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Battery</th><td>%0.2fV / %0.0f%%</td></tr>", batteryVoltage, batteryPercent)); // LiPo battery
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>AC Power State</th><td>%s</td></tr>", acPowerState ? "ON" : "OFF")); // AC power sense
   xSemaphoreGive(xMutexBattery); // Done with battery data
+
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>MQTT Server</th><td>%s mqtts://%s:%d</td></tr>", mqttClient.connected() ? "Connected to" : "Disconnected from ", MQTT_SERVER, MQTT_PORT)); // MQTT connection
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>IP Address</th><td>%d.%d.%d.%d</td></tr>", ip[0], ip[1], ip[2], ip[3])); // Network address
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Chip Information</th><td>%s</td></tr>", chipInformation)); // ESP32 chipset information
@@ -389,7 +420,7 @@ void setupMQTT()
 }
 
 // Connect/Reconnect to the MQTT server
-void mqttConnect()
+void connectMQTT()
 {
   // Wait a few seconds between connection attempts
   if (mqttLastConnectionAttempt == 0 || millis() - mqttLastConnectionAttempt >= 5000)
@@ -410,6 +441,78 @@ void mqttConnect()
   }
 }
 
+// Send all data to MQTT
+void updateMQTT()
+{
+  // Send sound level information to MQTT
+  xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data (calculated on a different thread)
+  sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSpl);
+  mqttClient.publish(MQTT_TOPIC_SPL, mqttStringBuffer, true);
+  sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSplAverage);
+  mqttClient.publish(MQTT_TOPIC_SPL_AVERAGE, mqttStringBuffer, true);
+  sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSplPeak);
+  mqttClient.publish(MQTT_TOPIC_SPL_PEAK, mqttStringBuffer, true);
+  xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
+
+  // Send light level information to MQTT
+  xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data (calculated on a different thread)
+  sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLux);
+  mqttClient.publish(MQTT_TOPIC_LUX, mqttStringBuffer, true);
+  sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLuxAverage);
+  mqttClient.publish(MQTT_TOPIC_LUX_AVERAGE, mqttStringBuffer, true);
+  sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLuxPeak);
+  mqttClient.publish(MQTT_TOPIC_LUX_PEAK, mqttStringBuffer, true);
+  sprintf(mqttStringBuffer, "%0.3f", lightSensorGain);
+  mqttClient.publish(MQTT_TOPIC_LUX_GAIN, mqttStringBuffer, true);
+  sprintf(mqttStringBuffer, "%d ms", lightSensorIntegrationTime);
+  mqttClient.publish(MQTT_TOPIC_LUX_INTEGRATION_TIME, mqttStringBuffer, true);
+  xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
+
+  // Send the environmentals to MQTT
+  xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
+  if (environmentSensorOK)
+  {
+    #if defined(BME280_TEMP_F)
+      sprintf(mqttStringBuffer, "%0.1f F", environmentTemperature);
+    #else
+      sprintf(mqttStringBuffer, "%0.1f C", environmentTemperature);
+    #endif
+    mqttClient.publish(MQTT_TOPIC_TEMPERATURE, mqttStringBuffer, true);
+    sprintf(mqttStringBuffer, "%0.1f%%", environmentHumidity);
+    mqttClient.publish(MQTT_TOPIC_HUMIDITY, mqttStringBuffer, true);
+    sprintf(mqttStringBuffer, "%0.1f mbar", environmentPressure);
+    mqttClient.publish(MQTT_TOPIC_PRESSURE, mqttStringBuffer, true);
+  }
+  xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+
+  // Send the measurement window size to MQTT
+  sprintf(mqttStringBuffer, "%d seconds", MEASUREMENT_WINDOW);
+  mqttClient.publish(MQTT_TOPIC_MEASUREMENT_WINDOW, mqttStringBuffer, true);
+
+  // Send uptime information to MQTT
+  xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data
+  sprintf(mqttStringBuffer, "%lld seconds", timer);
+  mqttClient.publish(MQTT_TOPIC_UPTIME, mqttStringBuffer, true);
+  mqttClient.publish(MQTT_TOPIC_UPTIME_DETAIL, uptimeStringBuffer, true);
+  xSemaphoreGive(xMutexUptime); // Done with uptime data
+
+  // Send free heap size to MQTT
+  sprintf(mqttStringBuffer, "%d", ESP.getFreeHeap());
+  mqttClient.publish(MQTT_TOPIC_FREE_HEAP, mqttStringBuffer, true);
+
+  // Send battery data and AC power on/off state to MQTT (calculated on a different thread)
+  xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
+  sprintf(mqttStringBuffer, "%0.2f V", batteryVoltage);
+  mqttClient.publish(MQTT_TOPIC_BATTERY_VOLTAGE, mqttStringBuffer, true);
+  sprintf(mqttStringBuffer, "%0.2f%%", batteryPercent);
+  mqttClient.publish(MQTT_TOPIC_BATTERY_PERCENT, mqttStringBuffer, true);
+  mqttClient.publish(MQTT_TOPIC_AC_POWER_STATE, acPowerState ? "ON" : "OFF", true);
+  xSemaphoreGive(xMutexBattery); // Done with battery data
+
+  // Send chip info to MQTT
+  mqttClient.publish(MQTT_TOPIC_CHIP_INFO, chipInformation, true);
+}
+
 // Setup the TFT ST7789 display
 void setupTFT()
 {
@@ -417,78 +520,70 @@ void setupTFT()
   Serial.println("TFT: Configuring ST7789");
   pinMode(TFT_I2C_POWER, OUTPUT);
   digitalWrite(TFT_I2C_POWER, HIGH);
+  pinMode(TFT_BACKLITE, OUTPUT);
+  digitalWrite(TFT_BACKLITE, HIGH);
   display.init(TFT_SCREEN_HEIGHT, TFT_SCREEN_WIDTH);
-  display.setRotation(3);
-  
+  display.setRotation(TFT_ROTATION);
+
+  // Clear the display
+  display.fillScreen(ST77XX_BLACK);
+
   // Establish defaults
   display.setRotation(3);
-  canvas.setFont(&FreeSans12pt7b);
+  canvas.setFont(&FreeSans9pt7b);
   canvas.setTextColor(ST77XX_WHITE); // White text
 }
 
 // Update the TFT display
-void updateDisplay(float temperature, float humidity, float pressure, float battery)
+void updateDisplay()
 {
-  IPAddress ip = WiFi.localIP();
-  int16_t  x1, y1;
-  uint16_t w, h;
-/*
-  // Start with a clear buffer
-  oled.clearDisplay();
+  canvas.fillScreen(ST77XX_BLACK);
+  canvas.setFont(&FreeSans9pt7b);
+  canvas.setCursor(0, 20);
 
-  // Render the sensor RMS voltage in a large font on the top of the display
-  oled.setFont(&FreeSans18pt7b); // Larger font for the voltage
-  sprintf(oledStringBuffer, "%0.1f V", voltage);
-  oled.getTextBounds(oledStringBuffer, 0, 0, &x1, &y1, &w, &h); // Calculate the size of the voltage string
-  oled.setCursor((OLED_SCREEN_WIDTH - w) / 2, h - 2);
-  oled.print(oledStringBuffer);
+  xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
+  canvas.setTextColor(ST77XX_WHITE);
+  canvas.printf("%0.2f    %0.2f    %0.2f dB", soundSensorSpl, soundSensorSplAverage, soundSensorSplPeak);
+  canvas.println();
+  xSemaphoreGive(xMutexSoundSensor); // Done with sound data
 
-  // Default font (smaller than the voltage font) for environmentals and the IP address
-  oled.setFont();
+  xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
+  canvas.setTextColor(ST77XX_YELLOW);
+  canvas.printf("%0.2f  %0.2f  %0.2f lux", lightSensorLux, lightSensorLuxAverage, lightSensorLuxPeak);
+  canvas.println();
+  xSemaphoreGive(xMutexLightSensor); // Done with light data
 
-  // Render system uptime and battery data, toggling between the two every other second
-  xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data
+  xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
+  canvas.setTextColor(ST77XX_GREEN);
+  #if defined(BME280_TEMP_F)
+    canvas.printf("%0.1fF   %0.1f%%   %0.0f mbar", environmentTemperature, environmentHumidity, environmentPressure);
+  #else
+    canvas.printf("%0.1fC   %0.1f%%   %0.0f mbar", environmentTemperature, environmentHumidity, environmentPressure);
+  #endif
+  canvas.println();
+  xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+
+  xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
+  canvas.setTextColor(ST77XX_MAGENTA);
+  canvas.printf("Battery: %0.2fV / %0.0f%%", batteryVoltage, batteryPercent);
+  canvas.println();
+  xSemaphoreGive(xMutexBattery); // Done with battery data
+
+  xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
+  canvas.setTextColor(ST77XX_CYAN);
   if (uptimeSeconds % 2)
   {
-    // Show the system uptime in days/hours/minutes/seconds format
-    sprintf(oledStringBuffer, "%s", uptimeStringBuffer);
+    canvas.printf("Uptime: %s", uptimeStringBuffer);
   }
   else
   {
-    // Show the LiPo battery voltage
-    sprintf(oledStringBuffer, "Battery: %0.2f V", battery);
+    IPAddress ip = WiFi.localIP();
+    canvas.printf("IP Address: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
   }
+  //canvas.println();
   xSemaphoreGive(xMutexUptime); // Done with uptime data
-  oled.getTextBounds(oledStringBuffer, 0, 0, &x1, &y1, &w, &h); // Calculate the size of the string
-  oled.setCursor((OLED_SCREEN_WIDTH - w) / 2, OLED_SCREEN_HEIGHT - 29);
-  oled.print(oledStringBuffer);
 
-  // Render environmental data
-  if (environmentOK)
-  {
-    #if defined(BME280_TEMP_F)
-      sprintf(oledStringBuffer, "%0.0fF %0.0f%% %0.0f mbar", temperature, humidity, pressure);
-    #else
-      sprintf(oledStringBuffer, "%0.0fC %0.0f%% %0.0f mbar", temperature, humidity, pressure);
-    #endif
-  }
-  else
-  {
-    sprintf(oledStringBuffer, "%s", "BME280 offline");
-  }
-  oled.getTextBounds(oledStringBuffer, 0, 0, &x1, &y1, &w, &h); // Calculate the size of the string
-  oled.setCursor((OLED_SCREEN_WIDTH - w) / 2, OLED_SCREEN_HEIGHT - 18);
-  oled.print(oledStringBuffer);
-
-  // Render the IP address
-  sprintf(oledStringBuffer, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-  oled.getTextBounds(oledStringBuffer, 0, 0, &x1, &y1, &w, &h); // Calculate the size of the string
-  oled.setCursor((OLED_SCREEN_WIDTH - w) / 2, OLED_SCREEN_HEIGHT - 7);
-  oled.print(oledStringBuffer);
-
-  // Show the rendered buffer
-  oled.display();
-  */
+  display.drawRGBBitmap(0, 0, canvas.getBuffer(), TFT_SCREEN_WIDTH, TFT_SCREEN_HEIGHT);
 }
 
 // Setup the environmental sensor
@@ -655,22 +750,33 @@ void setupBatteryMonitor()
   }
 }
 
-// Read the battery voltage using the MAX17048 LiPo battery monitor
+// Read the battery voltage using the MAX17048 LiPo battery monitor, and also read the AC power on/off state from a digital input pin
 void measureBattery()
 {
-  xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data
+  // Start accessing the battery data
+  xSemaphoreTake(xMutexBattery, portMAX_DELAY);
+
+  // Read battery voltage
   float v = max17048.cellVoltage();
+  float p = max17048.cellPercent();
   if (batteryVoltage == 0)
   {
     // Initialize values
     batteryVoltage = v;
+    batteryPercent = p;
   }
   else
   {
-    // EMA moving average to smooth the voltage reading
+    // EMA moving average to smooth the readings
     batteryVoltage = (batteryVoltage * (MEASUREMENT_WINDOW - 1) + v) / MEASUREMENT_WINDOW;
+    batteryPercent = (batteryPercent * (MEASUREMENT_WINDOW - 1) + p) / MEASUREMENT_WINDOW;
   }
-  xSemaphoreGive(xMutexBattery); // Done with battery data
+
+  // Read the AC power on/off state from a digital input pin
+  acPowerState = digitalRead(AC_POWER_PIN);
+
+  // Done with battery data
+  xSemaphoreGive(xMutexBattery);
 }
 
 // Read all I2C devices in sequence (background task)
@@ -752,11 +858,11 @@ void measureSound(void *parameter)
   {
     // Read the I2S data into the buffer
     size_t bytesRead = 0;
-    esp_err_t result = i2s_read(I2S_PORT_NUM,        // I2S port number
-                                soundSensorDataBuffer,     // Buffer to store data
+    esp_err_t result = i2s_read(I2S_PORT_NUM,                      // I2S port number
+                                soundSensorDataBuffer,             // Buffer to store data
                                 I2S_DMA_BUF_LEN * sizeof(int32_t), // Max bytes to read (buffer size)
-                                &bytesRead,          // Number of bytes actually read
-                                portMAX_DELAY);      // Wait indefinitely for data
+                                &bytesRead,                        // Number of bytes actually read
+                                portMAX_DELAY);                    // Wait indefinitely for data
     if (result == ESP_OK)
     {
       if (bytesRead > 0)
@@ -854,6 +960,9 @@ void setup()
   pinMode(1, INPUT_PULLDOWN);
   pinMode(2, INPUT_PULLDOWN);
 
+  // AC power on/off sense pin setup
+  pinMode(AC_POWER_PIN, INPUT_PULLDOWN);
+
   // Chip information
   sprintf(chipInformation, "%s %s (revison v%d.%d), %dMHz", ESP.getChipModel(), ESP.getCoreVersion(), efuse_hal_get_major_chip_version(), efuse_hal_get_minor_chip_version(), ESP.getCpuFreqMHz());
 
@@ -882,20 +991,13 @@ void setup()
 void loop()
 {
   // MQTT connection management
-  if (!mqttClient.connected())
-  {
-    mqttConnect();
-  }
-  else
-  {
-    mqttClient.loop();
-  }
+  if (!mqttClient.connected()) connectMQTT(); else mqttClient.loop();
 
   // Web server request management
   webServer.handleClient();
 
   // Uptime calculations: How long has the ESP32 been running since it was booted up?
-  xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
+  xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data
   bool newSecond = false;
   uptimeSecondsTotal = esp_timer_get_time() / 1000000;
   if (uptimeSecondsTotal > lastUptimeSecondsTotal)
@@ -914,101 +1016,37 @@ void loop()
   timer = uptimeSecondsTotal; // Copy the timer so it can be used without the semaphore
   xSemaphoreGive(xMutexUptime); // Done with uptime data
 
-  // Turn on the TFT display for a few seconds when a button is pressed
-  bool buttonPressed = false;
-  if (digitalRead(0) == 0 || digitalRead(1) || digitalRead(1)) // NOTE: D0 is different
-  {
-    buttonPressed = true;
-    displayTimer = timer;
-  }
-
   // Update outputs every specified update interval, and the first-time through the loop
-  bool updateMqtt = timer - lastUpdateTimeMqtt >= UPDATE_INTERVAL_MQTT;
   bool updateTft  = timer - lastUpdateTimeTft  >= UPDATE_INTERVAL_TFT; // The display can be updated more frequently than MQTT
-  if (updateMqtt || updateTft || lastUpdateTimeMqtt == 0 || lastUpdateTimeTft == 0)
+  bool updateMqtt = timer - lastUpdateTimeMqtt >= UPDATE_INTERVAL_MQTT;
+  if (updateTft || updateMqtt || lastUpdateTimeTft == 0 || lastUpdateTimeMqtt == 0)
   {
-    // Quickly copy the environmentals so the semaphore isn't held during time consuming operations
-    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing environmental data (measured on a different thread)
-    float environmentOK = environmentSensorOK;
-    float temperature = environmentTemperature;
-    float humidity = environmentHumidity;
-    float pressure = environmentPressure;
-    xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
-
-    // Quickly copy the battery data so the semaphore isn't held during time consuming operations
-    xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
-    float battery = batteryVoltage;
-    xSemaphoreGive(xMutexBattery); // Done with battery data
-
-    // Update the TFT display
+    // Update the display
     if (updateTft)
     {
       lastUpdateTimeTft = timer;
-      updateDisplay(temperature, humidity, pressure, battery);
+      updateDisplay();
     }
 
     // Update MQTT
     if (updateMqtt)
     {
       lastUpdateTimeMqtt = timer;
-
-      // Send sound level information to MQTT
-      sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSpl);
-      mqttClient.publish(MQTT_TOPIC_SPL, mqttStringBuffer, true);
-      sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSplAverage);
-      mqttClient.publish(MQTT_TOPIC_SPL_AVERAGE, mqttStringBuffer, true);
-      sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSplPeak);
-      mqttClient.publish(MQTT_TOPIC_SPL_PEAK, mqttStringBuffer, true);
-
-      // Send light level information to MQTT
-      sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLux);
-      mqttClient.publish(MQTT_TOPIC_LUX, mqttStringBuffer, true);
-      sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLuxAverage);
-      mqttClient.publish(MQTT_TOPIC_LUX_AVERAGE, mqttStringBuffer, true);
-      sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLuxPeak);
-      mqttClient.publish(MQTT_TOPIC_LUX_PEAK, mqttStringBuffer, true);
-      sprintf(mqttStringBuffer, "%0.3f", lightSensorGain);
-      mqttClient.publish(MQTT_TOPIC_LUX_GAIN, mqttStringBuffer, true);
-      sprintf(mqttStringBuffer, "%d ms", lightSensorIntegrationTime);
-      mqttClient.publish(MQTT_TOPIC_LUX_INTEGRATION_TIME, mqttStringBuffer, true);
-
-      // Send the environmentals to MQTT
-      if (environmentOK)
-      {
-        #if defined(BME280_TEMP_F)
-          sprintf(mqttStringBuffer, "%0.1f F", temperature);
-        #else
-          sprintf(mqttStringBuffer, "%0.1f C", temperature);
-        #endif
-        mqttClient.publish(MQTT_TOPIC_TEMPERATURE, mqttStringBuffer, true);
-        sprintf(mqttStringBuffer, "%0.1f%%", humidity);
-        mqttClient.publish(MQTT_TOPIC_HUMIDITY, mqttStringBuffer, true);
-        sprintf(mqttStringBuffer, "%0.1f mbar", pressure);
-        mqttClient.publish(MQTT_TOPIC_PRESSURE, mqttStringBuffer, true);
-      }
-
-      // Send the measurement window size to MQTT
-      sprintf(mqttStringBuffer, "%d seconds", MEASUREMENT_WINDOW);
-      mqttClient.publish(MQTT_TOPIC_MEASUREMENT_WINDOW, mqttStringBuffer, true);
-
-      // Send uptime information to MQTT
-      xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
-      mqttClient.publish(MQTT_TOPIC_UPTIME, uptimeStringBuffer, true);
-      sprintf(mqttStringBuffer, "%lld", timer);
-      mqttClient.publish(MQTT_TOPIC_UPTIME_SECONDS, mqttStringBuffer, true);
-      xSemaphoreGive(xMutexUptime); // Done with uptime data
-
-      // Send free heap size to MQTT
-      sprintf(mqttStringBuffer, "%d", ESP.getFreeHeap());
-      mqttClient.publish(MQTT_TOPIC_FREE_HEAP, mqttStringBuffer, true);
-
-      // Send battery voltage to MQTT
-      sprintf(mqttStringBuffer, "%0.2f V", battery);
-      mqttClient.publish(MQTT_TOPIC_BATTERY_VOLTAGE, mqttStringBuffer, true);
-
-      // Send chip info to MQTT
-      mqttClient.publish(MQTT_TOPIC_CHIP_INFO, chipInformation, true);
+      updateMQTT();
     }
+  }
+
+  // Turn on the TFT display backlight for a few seconds when a button is pressed. The display is constantly updated, so buttons just turn the backlight on/off.
+  bool buttonPressed = false;
+  if (digitalRead(0) == 0 || digitalRead(1) || digitalRead(1)) // NOTE: D0 is different
+  {
+    buttonPressed = true;
+    displayTimer = timer;
+    digitalWrite(TFT_BACKLITE, HIGH); // Power on the TFT backlight
+  }
+  else if (timer - displayTimer == TFT_TIMEOUT)
+  {
+    digitalWrite(TFT_BACKLITE, LOW); // Power off the TFT backlight
   }
 
   // Yield to other tasks, and slow down the main loop a little
