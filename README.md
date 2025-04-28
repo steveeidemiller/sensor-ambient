@@ -20,6 +20,7 @@ This solution is based on the ESP32-S3 Reverse TFT Feather from Adafruit. The de
 - BME280 module for collecting environmental data [Adafruit #2652](https://www.adafruit.com/product/2652)
 - Two Stemma QT (or Qwiic) cables to connect the ESP32 to the VEML7700 and BME280 modules
 - LiPo battery (WARNING: Be sure to check the battery cable polarity to ensure that it matches the ESP32 connector!)
+TODO: two resistors for AC power sensing
 
 ## Implementation Overview
 - 3D print the included device mount if desired

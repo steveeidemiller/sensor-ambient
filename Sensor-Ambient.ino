@@ -2,9 +2,9 @@
  * @file Sensor-Ambient.ino
  * @brief ESP32-based sound, light and environmental sensor with MQTT, TFT display, and web server support
  * 
- * This ESP32-S3 project is designed to monitor ambient sound, light, and environmentals in areas such as attics,
- * basements, garages, etc. It provides calibrated readings and can be integrated into various home automation
- * platforms through MQTT.
+ * This ESP32-S3 project is designed to monitor ambient sound, light, environmentals and AC power state in areas such
+ * as attics, basements, garages, etc. It provides calibrated readings and can be integrated into various home
+ * automation platforms through MQTT.
  *
  * Features:
  * - SPH0645 I2S sound sensor for ambient sound level detection
@@ -21,9 +21,21 @@
 //TODO: Add remote IP restrictions as an array of IP's for NGINX. Can the web server abort a connection?
 //TODO: Allow MQTT to be done without cert and without user/pass, allow MQTT private key auth via define switch with client cert+key, update HTML page with mqtt:// or mqtts://
 
-//TODO: handle large lux values on TFT display logic
 //TODO: refactor "TFT" stuff to "display"
 //TODO: implement metrics
+//TODO: TFT rotation doesn't seem to work, needs testing, perhaps it's a canvas thing?
+
+/*
+{
+  temp: [100.0,100.0],
+  humidity: [100.0,100.0],
+  pressure: [1000,1000],
+  sound: [100.0,100.0],
+  light: [100000,100000],
+  labels: [123456789,123456789],
+  currentTime: 123456789
+}
+*/
 
 // Libraries
 #include <Arduino.h>
@@ -72,7 +84,7 @@ char chipInformation[100]; // Chip information buffer
 
 // Web server configuration
 WebServer webServer(80);
-char webStringBuffer[4096];
+char webStringBuffer[10 * 1024];
 
 // MQTT configuration
 //WiFiClient espClient;
@@ -128,9 +140,14 @@ int lightSensorIntegrationTime = VEML7700_IT_100MS; // Current integration time 
 float lightSensorPeakLevels[MEASUREMENT_WINDOW]; // Track max light levels for each second
 int lightSensorLastTimeIndex = 0; // Last time index into lightSensorPeakLevels[] for tracking peak light levels during each second
 
+//
+unsigned char* psramDataSet;
+char dataFormatBuffer[DATA_ELEMENT_SIZE + 1]; // +1 for NULL terminator
+
 // Main loop
 uint64_t lastUpdateTimeMqtt = 0; // Time of last MQTT update
 uint64_t lastUpdateTimeTft = 0; // Time of last OLED update
+uint64_t lastUpdateTimeData = 0; // Time of last data set update
 uint64_t timer = 0; // Copy of the main uptime timer that doesn't need a semaphore
 
 // Static HTML template
@@ -187,10 +204,173 @@ const char htmlHeader[] = R"EOF(
         color: purple;
       }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      var jsonData;
+
+      var sensorChartData = {
+        datasets: [
+          {
+            label: 'Sound (dB)',
+            borderColor: 'orange',
+            backgroundColor: 'orange',
+            yAxisID: 'yS',
+            pointRadius: 1
+          },
+          {
+            label: 'Light (lux)',
+            borderColor: 'yellow',
+            backgroundColor: 'yellow',
+            yAxisID: 'yL',
+            pointRadius: 1
+          }
+        ]
+      };
+
+      var sensorChartOptions = {
+        type: 'line',
+        options: {
+          responsive: true,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          stacked: false,
+          plugins: {
+            title: {
+              display: true,
+              text: 'Sound and Light'
+            }
+          },
+          scales: {
+            yS: {
+              type: 'linear',
+              display: true,
+              position: 'left',
+              ticks: { color: 'orange' },
+              grid: {
+                drawOnChartArea: false // Only want grid lines for one axis to show up
+              }
+            },
+            yL: {
+              type: 'logarithmic',
+              display: true,
+              position: 'right',
+              ticks: { color: 'yellow' }
+            }
+          }
+        },
+      };
+
+      var environmentalChartData = {
+        datasets: [
+          {
+            label: 'Pressure (mbar)',
+            borderColor: 'blue',
+            backgroundColor: 'blue',
+            yAxisID: 'yP',
+            pointRadius: 1
+          },
+          {
+            label: 'Temperature (F)',
+            borderColor: 'red',
+            backgroundColor: 'red',
+            yAxisID: 'yT',
+            pointRadius: 1
+          },
+          {
+            label: 'Humidity (%%)', // Need double percent symbols because of sprintf()
+            borderColor: 'green',
+            backgroundColor: 'green',
+            yAxisID: 'yH',
+            pointRadius: 1
+          }
+        ]
+      };
+
+      var environmentalChartOptions = {
+        type: 'line',
+        options: {
+          responsive: true,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          stacked: false,
+          plugins: {
+            title: {
+              display: true,
+              text: 'Environmentals'
+            }
+          },
+          scales: {
+            yP: {
+              type: 'linear',
+              display: true,
+              position: 'left',
+              ticks: { color: 'blue' },
+              grid: {
+                drawOnChartArea: false // Only want grid lines for one axis to show up
+              }
+            },
+            yT: {
+              type: 'linear',
+              display: true,
+              position: 'right',
+              ticks: { color: 'red' }
+            },
+            yH: {
+              type: 'linear',
+              display: true,
+              position: 'right',
+              ticks: { color: 'green' },
+              grid: {
+                drawOnChartArea: false // Only want grid lines for one axis to show up
+              }
+            }
+          }
+        },
+      };
+
+      document.addEventListener('DOMContentLoaded', function() {
+        fetch('/data')
+        .then(response => {
+            if (response.ok) return response.text(); // The data is in plain text and not JSON
+        })
+        .then(data => {
+          jsonData = JSON.parse('[' + data.trim().slice(0,-1) + ']'); // slice() removes the trailing comma
+          if (jsonData.length)
+          {
+            var streamLength = jsonData.length / 6; // There are six data streams
+            var temperature  = jsonData.slice(0               , streamLength);
+            var humidity     = jsonData.slice(streamLength    , streamLength * 2);
+            var pressure     = jsonData.slice(streamLength * 2, streamLength * 3);
+            var sound        = jsonData.slice(streamLength * 3, streamLength * 4);
+            var light        = jsonData.slice(streamLength * 4, streamLength * 5);
+            var timeIndex    = jsonData.slice(streamLength * 5, streamLength * 6);
+
+            sensorChartData.labels = timeIndex;
+            sensorChartData.datasets[0].data = sound;
+            sensorChartData.datasets[1].data = light;
+            sensorChartOptions.data = sensorChartData;
+            new Chart(document.getElementById('chartSoundLight'), sensorChartOptions);
+
+            environmentalChartData.labels = timeIndex;
+            environmentalChartData.datasets[0].data = pressure;
+            environmentalChartData.datasets[1].data = temperature;
+            environmentalChartData.datasets[2].data = humidity;
+            environmentalChartOptions.data = environmentalChartData;
+            new Chart(document.getElementById('chartEnvironmentals'), environmentalChartOptions);
+          }
+        });
+      });
+    </script>
   </head>
   <body>
 )EOF";
 const char htmlFooter[] = R"EOF(
+    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartSoundLight"></canvas></div>
+    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartEnvironmentals"></canvas></div>
   </body>
 </html>
 )EOF";
@@ -300,7 +480,7 @@ void webHandlerRoot()
 
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Battery</th><td>%0.2fV / %0.0f%%</td></tr>", batteryVoltage, batteryPercent)); // LiPo battery
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>AC Power State</th><td>%s</td></tr>", acPowerState ? "ON" : "OFF")); // AC power sense
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>AC Power State</th><td>%s</td></tr>", acPowerState ? "1 (On)" : "0 (Off)")); // AC power sense
   xSemaphoreGive(xMutexBattery); // Done with battery data
 
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>MQTT Server</th><td>%s mqtts://%s:%d</td></tr>", mqttClient.connected() ? "Connected to" : "Disconnected from ", MQTT_SERVER, MQTT_PORT)); // MQTT connection
@@ -395,6 +575,15 @@ void webHandlerMetrics()
   webServer.send(200, "text/plain", webStringBuffer);
 }
 
+//
+void webHandlerData()
+{
+  if (psramDataSet)
+  {
+    webServer.send(200, "text/plain", (const char*) psramDataSet);
+  }
+}
+
 // Web server setup 
 void setupWebserver()
 {
@@ -403,6 +592,7 @@ void setupWebserver()
   // Set URI handlers
   webServer.on("/", webHandlerRoot);
   webServer.on("/metrics", webHandlerMetrics);
+  webServer.on("/data", webHandlerData);
   webServer.onNotFound(webHandler404);
 
   // Start the server
@@ -423,7 +613,7 @@ void setupMQTT()
 void connectMQTT()
 {
   // Wait a few seconds between connection attempts
-  if (mqttLastConnectionAttempt == 0 || millis() - mqttLastConnectionAttempt >= 5000)
+  if (mqttLastConnectionAttempt == 0 || millis() - mqttLastConnectionAttempt >= 15000)
   {
     mqttLastConnectionAttempt = millis();
 
@@ -506,11 +696,85 @@ void updateMQTT()
   mqttClient.publish(MQTT_TOPIC_BATTERY_VOLTAGE, mqttStringBuffer, true);
   sprintf(mqttStringBuffer, "%0.2f%%", batteryPercent);
   mqttClient.publish(MQTT_TOPIC_BATTERY_PERCENT, mqttStringBuffer, true);
-  mqttClient.publish(MQTT_TOPIC_AC_POWER_STATE, acPowerState ? "ON" : "OFF", true);
+  mqttClient.publish(MQTT_TOPIC_AC_POWER_STATE, acPowerState ? "1" : "0", true); // 1 for "ON" or 0 for "OFF"
   xSemaphoreGive(xMutexBattery); // Done with battery data
 
   // Send chip info to MQTT
   mqttClient.publish(MQTT_TOPIC_CHIP_INFO, chipInformation, true);
+}
+
+// Allocate PSRAM for long-term data storage
+void setupPsram()
+{
+  if (psramFound())
+  {
+    if (psramInit())
+    {
+      psramDataSet = (unsigned char*)ps_malloc(DATA_SET_SIZE + 1); // +1 to make room for the NULL terminator
+      if (psramDataSet)
+      {
+        memset(psramDataSet, ' ', DATA_SET_SIZE);
+        psramDataSet[DATA_SET_SIZE] = 0; // NULL terminator
+        Serial.print("PSRAM: Allocated "); Serial.print(DATA_SET_SIZE + 1); Serial.println(" bytes");
+      }
+      else
+      {
+        Serial.print("PSRAM: ps_malloc() failed allocating "); Serial.print(DATA_SET_SIZE + 1); Serial.println(" bytes from "); Serial.println(ESP.getFreePsram());
+      }
+    }
+    else
+    {
+      Serial.println("PSRAM: Initialization failed");
+    }
+  }
+  else
+  {
+    Serial.println("PSRAM: Not found");
+  }
+}
+
+// Overloaded helper function to format a data value and put it at the end of the specified data stream (overwriting the end value/slot)
+void addDataElement(int stream, float value)
+{
+  memset(dataFormatBuffer, ' ', DATA_ELEMENT_SIZE);   // Fill with spaces
+  int n = sprintf(dataFormatBuffer, "%0.2f,", value); // Format the value with delimiter and NULL terminator
+  if (n > 0) dataFormatBuffer[n] = ' ';               // Remove sprintf() NULL terminator
+  int dataSetIndex = stream * DATA_STREAM_SIZE + DATA_STREAM_SIZE - DATA_ELEMENT_SIZE; // Byte index of the last element in the specified data stream
+  memcpy(psramDataSet + dataSetIndex, dataFormatBuffer, DATA_ELEMENT_SIZE); // Copy the new value (with delimiter) into the data set
+}
+void addDataElement(int stream, uint64_t value)
+{
+  memset(dataFormatBuffer, ' ', DATA_ELEMENT_SIZE);   // Fill with spaces
+  int n = sprintf(dataFormatBuffer, "%lld,", value);  // Format the value with delimiter and NULL terminator
+  if (n > 0) dataFormatBuffer[n] = ' ';               // Remove sprintf() NULL terminator
+  int dataSetIndex = stream * DATA_STREAM_SIZE + DATA_STREAM_SIZE - DATA_ELEMENT_SIZE; // Byte index of the last element in the specified data stream
+  memcpy(psramDataSet + dataSetIndex, dataFormatBuffer, DATA_ELEMENT_SIZE); // Copy the new value (with delimiter) into the data set
+}
+
+// Add current sensor values to the end of each data stream
+void updateDataSet()
+{
+  if (psramDataSet)
+  {
+    // Shift all data streams down by one element. The updates below will overwrite the last element in each stream.
+    memmove(psramDataSet, psramDataSet + DATA_ELEMENT_SIZE, DATA_SET_SIZE - DATA_ELEMENT_SIZE);
+
+    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
+    addDataElement(0, environmentTemperature);
+    addDataElement(1, environmentHumidity);
+    addDataElement(2, environmentPressure);
+    xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+
+    xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data (calculated on a different thread)
+    addDataElement(3, soundSensorSpl);
+    xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
+
+    xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data (calculated on a different thread)
+    addDataElement(4, lightSensorLux);
+    xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
+
+    addDataElement(5, timer); // Time index
+  }
 }
 
 // Setup the TFT ST7789 display
@@ -534,6 +798,36 @@ void setupTFT()
   canvas.setTextColor(ST77XX_WHITE); // White text
 }
 
+// Helper function to format the wide range of possible lux values into a consistent 4-digit representation with variable decimal places
+char formatLuxBuffer[10];
+void formatLux(float lux)
+{
+  if (lux < 10)
+  {
+    sprintf(formatLuxBuffer, "%0.3f", lux);
+  }
+  else if (lux < 100)
+  {
+    sprintf(formatLuxBuffer, "%.2f", lux);
+  }
+  else if (lux < 1000)
+  {
+    sprintf(formatLuxBuffer, "%.1f", lux);
+  }
+  else if (lux < 10000)
+  {
+    sprintf(formatLuxBuffer, "%.0f", lux);
+  }
+  else if (lux < 100000)
+  {
+    sprintf(formatLuxBuffer, "%0.2fK", lux/1000); // Such as "28.00K"
+  }
+  else
+  {
+    sprintf(formatLuxBuffer, "%0.1fK", lux/1000); // Such as "102.0K"
+  }
+}
+
 // Update the TFT display
 void updateDisplay()
 {
@@ -549,7 +843,10 @@ void updateDisplay()
 
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
   canvas.setTextColor(ST77XX_YELLOW);
-  canvas.printf("%0.2f  %0.2f  %0.2f lux", lightSensorLux, lightSensorLuxAverage, lightSensorLuxPeak);
+  //canvas.printf("%0.2f  %0.2f  %0.2f lux", lightSensorLux, lightSensorLuxAverage, lightSensorLuxPeak);
+  formatLux(lightSensorLux);        canvas.print(formatLuxBuffer); canvas.print("  ");
+  formatLux(lightSensorLuxAverage); canvas.print(formatLuxBuffer); canvas.print("  ");
+  formatLux(lightSensorLuxPeak);    canvas.print(formatLuxBuffer); canvas.print(" lux");
   canvas.println();
   xSemaphoreGive(xMutexLightSensor); // Done with light data
 
@@ -750,7 +1047,7 @@ void setupBatteryMonitor()
   }
 }
 
-// Read the battery voltage using the MAX17048 LiPo battery monitor, and also read the AC power on/off state from a digital input pin
+// Read the battery voltage using the MAX17048 LiPo battery monitor, and ALSO read the AC power on/off state from a digital input pin
 void measureBattery()
 {
   // Start accessing the battery data
@@ -794,7 +1091,7 @@ void readI2CDevices(void *parameter)
     measureBattery(); // Read the LiPo battery voltage
     timer = millis() - timer; // Elapsed time in ms, which seems to be around 711 ms
 
-    // Only read the I2C devices approximately every second. Nothing more than that is really needed.
+    // Only read the I2C devices approximately every second, but just SLIGHTLY faster to ensure that light and sound peak tracking gets enough hits
     if (timer < 950)
     {
       delay(950 - timer); // Non-blocking delay on ESP32, in milliseconds
@@ -935,6 +1232,9 @@ void setup()
   // Serial port for debugging purposes
   Serial.begin(115200);
 
+  // Allocate PSRAM for long-term data storage, before any other setup that might try and use PSRAM
+  setupPsram();
+
   // Core features
   setupWiFi();
   setupMDNS();
@@ -964,7 +1264,7 @@ void setup()
   pinMode(AC_POWER_PIN, INPUT_PULLDOWN);
 
   // Chip information
-  sprintf(chipInformation, "%s %s (revison v%d.%d), %dMHz", ESP.getChipModel(), ESP.getCoreVersion(), efuse_hal_get_major_chip_version(), efuse_hal_get_minor_chip_version(), ESP.getCpuFreqMHz());
+  sprintf(chipInformation, "%s %s (revison v%d.%d), %dMHz, %dMB Flash, %dMB PSRAM", ESP.getChipModel(), ESP.getCoreVersion(), efuse_hal_get_major_chip_version(), efuse_hal_get_minor_chip_version(), ESP.getCpuFreqMHz(), ESP.getFlashChipSize()/1024/1024, ESP.getPsramSize()/1024/1024);
 
   // Create a task for reading all of the I2C devices
   xTaskCreate(
@@ -991,7 +1291,7 @@ void setup()
 void loop()
 {
   // MQTT connection management
-  if (!mqttClient.connected()) connectMQTT(); else mqttClient.loop();
+  //if (!mqttClient.connected()) connectMQTT(); else mqttClient.loop();
 
   // Web server request management
   webServer.handleClient();
@@ -1019,7 +1319,8 @@ void loop()
   // Update outputs every specified update interval, and the first-time through the loop
   bool updateTft  = timer - lastUpdateTimeTft  >= UPDATE_INTERVAL_TFT; // The display can be updated more frequently than MQTT
   bool updateMqtt = timer - lastUpdateTimeMqtt >= UPDATE_INTERVAL_MQTT;
-  if (updateTft || updateMqtt || lastUpdateTimeTft == 0 || lastUpdateTimeMqtt == 0)
+  bool updateData = timer - lastUpdateTimeData >= UPDATE_INTERVAL_DATA;
+  if (updateTft || updateMqtt || updateData || lastUpdateTimeTft == 0 || lastUpdateTimeMqtt == 0 || updateData == 0)
   {
     // Update the display
     if (updateTft)
@@ -1034,13 +1335,18 @@ void loop()
       lastUpdateTimeMqtt = timer;
       updateMQTT();
     }
+
+    // Update the data set
+    if (updateData)
+    {
+      lastUpdateTimeData = timer;
+      updateDataSet();
+    }
   }
 
   // Turn on the TFT display backlight for a few seconds when a button is pressed. The display is constantly updated, so buttons just turn the backlight on/off.
-  bool buttonPressed = false;
   if (digitalRead(0) == 0 || digitalRead(1) || digitalRead(1)) // NOTE: D0 is different
   {
-    buttonPressed = true;
     displayTimer = timer;
     digitalWrite(TFT_BACKLITE, HIGH); // Power on the TFT backlight
   }
