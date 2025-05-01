@@ -65,8 +65,8 @@ const char htmlHeader[] = R"EOF(
         datasets: [
           {
             label: 'Sound (dB)',
-            borderColor: 'cyan',
-            backgroundColor: 'cyan',
+            borderColor: 'magenta',
+            backgroundColor: 'magenta',
             yAxisID: 'yS',
             pointRadius: 1
           },
@@ -100,7 +100,7 @@ const char htmlHeader[] = R"EOF(
               type: 'linear',
               display: true,
               position: 'left',
-              ticks: { color: 'cyan' }
+              ticks: { color: 'magenta' }
             },
             yL: {
               type: 'linear',
@@ -195,11 +195,11 @@ const char htmlHeader[] = R"EOF(
           if (jsonData.length)
           {
             var streamLength = jsonData.length / 6; // There are six data streams
-            var temperature  = jsonData.slice(0               , streamLength);
-            var humidity     = jsonData.slice(streamLength    , streamLength * 2);
-            var pressure     = jsonData.slice(streamLength * 2, streamLength * 3);
-            var sound        = jsonData.slice(streamLength * 3, streamLength * 4);
-            var light        = jsonData.slice(streamLength * 4, streamLength * 5);
+            var sound        = jsonData.slice(0               , streamLength);
+            var light        = jsonData.slice(streamLength    , streamLength * 2);
+            var temperature  = jsonData.slice(streamLength * 2, streamLength * 3);
+            var humidity     = jsonData.slice(streamLength * 3, streamLength * 4);
+            var pressure     = jsonData.slice(streamLength * 4, streamLength * 5);
             var timeIndex    = jsonData.slice(streamLength * 5, streamLength * 6);
 
             sensorChartData.labels = timeIndex;

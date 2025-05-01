@@ -229,42 +229,37 @@ void webHandlerMetrics()
   // Build the HTML response in the web string buffer
   char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
 
-  // Sound pressure level
+  // Sound level
   xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
-  buffer += buffercat(buffer, "# HELP spl Sound Pressure Level (current) (dB)\n");
-  buffer += buffercat(buffer, "# TYPE spl gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "spl %0.2f\n\n", soundSensorSpl));
-  buffer += buffercat(buffer, "# HELP spl_average Sound Pressure Level (average) (dB)\n");
-  buffer += buffercat(buffer, "# TYPE spl_average gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "spl_average %0.2f\n\n", soundSensorSplAverage));
-  buffer += buffercat(buffer, "# HELP spl_peak Sound Pressure Level (peak) (dB)\n");
-  buffer += buffercat(buffer, "# TYPE spl_peak gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "spl_peak %0.2f\n\n", soundSensorSplPeak));
+  buffer += buffercat(buffer, "# HELP sound_level Sound Pressure Level (current) (dB)\n");
+  buffer += buffercat(buffer, "# TYPE sound_level gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "sound_level %0.2f\n\n", soundSensorSpl));
+  buffer += buffercat(buffer, "# HELP sound_level_average Sound Pressure Level (average) (dB)\n");
+  buffer += buffercat(buffer, "# TYPE sound_level_average gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "sound_level_average %0.2f\n\n", soundSensorSplAverage));
+  buffer += buffercat(buffer, "# HELP sound_level_peak Sound Pressure Level (peak) (dB)\n");
+  buffer += buffercat(buffer, "# TYPE sound_level_peak gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "sound_level_peak %0.2f\n\n", soundSensorSplPeak));
   xSemaphoreGive(xMutexSoundSensor); // Done with sound data
 
   // Light level
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
-  buffer += buffercat(buffer, "# HELP lux Light Level (current) (lux)\n");
-  buffer += buffercat(buffer, "# TYPE lux gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "lux %0.2f\n\n", lightSensorLux));
-  buffer += buffercat(buffer, "# HELP lux_average Light Level (average) (lux)\n");
-  buffer += buffercat(buffer, "# TYPE lux_average gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "lux_average %0.2f\n\n", lightSensorLuxAverage));
-  buffer += buffercat(buffer, "# HELP lux_peak Light Level (peak) (lux)\n");
-  buffer += buffercat(buffer, "# TYPE lux_peak gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "lux_peak %0.2f\n\n", lightSensorLuxPeak));
-  buffer += buffercat(buffer, "# HELP lux_measurement_gain Light Measurement Gain\n");
-  buffer += buffercat(buffer, "# TYPE lux_measurement_gain gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "lux_measurement_gain %0.3f\n\n", lightSensorGain));
-  buffer += buffercat(buffer, "# HELP lux_measurement_integration_time Light Measurement Integration Time (ms)\n");
-  buffer += buffercat(buffer, "# TYPE lux_measurement_integration_time gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "lux_measurement_integration_time %d\n\n", lightSensorIntegrationTime));
+  buffer += buffercat(buffer, "# HELP light_level Light Level (current) (lux)\n");
+  buffer += buffercat(buffer, "# TYPE light_level gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "light_level %0.2f\n\n", lightSensorLux));
+  buffer += buffercat(buffer, "# HELP light_level_average Light Level (average) (lux)\n");
+  buffer += buffercat(buffer, "# TYPE light_level_average gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "light_level_average %0.2f\n\n", lightSensorLuxAverage));
+  buffer += buffercat(buffer, "# HELP light_level_peak Light Level (peak) (lux)\n");
+  buffer += buffercat(buffer, "# TYPE light_level_peak gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "light_level_peak %0.2f\n\n", lightSensorLuxPeak));
+  buffer += buffercat(buffer, "# HELP light_level_measurement_gain Light Measurement Gain\n");
+  buffer += buffercat(buffer, "# TYPE light_level_measurement_gain gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "light_level_measurement_gain %0.3f\n\n", lightSensorGain));
+  buffer += buffercat(buffer, "# HELP light_level_measurement_integration_time Light Measurement Integration Time (ms)\n");
+  buffer += buffercat(buffer, "# TYPE light_level_measurement_integration_time gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "light_level_measurement_integration_time %d\n\n", lightSensorIntegrationTime));
   xSemaphoreGive(xMutexLightSensor); // Done with light data
-
-  // Measurement window
-  buffer += buffercat(buffer, "# HELP measurement_window Measurement Window for Average/Peak Calculations (seconds)\n");
-  buffer += buffercat(buffer, "# TYPE measurement_window gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "measurement_window %d\n\n", MEASUREMENT_WINDOW));
 
   // Environmentals
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
@@ -286,12 +281,17 @@ void webHandlerMetrics()
   }
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
-  // Heap memory
+  // Measurement window
+  buffer += buffercat(buffer, "# HELP measurement_window Measurement Window for Average/Peak Calculations (seconds)\n");
+  buffer += buffercat(buffer, "# TYPE measurement_window gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "measurement_window %d\n\n", MEASUREMENT_WINDOW));
+
+  // Free heap memory
   buffer += buffercat(buffer, "# HELP esp32_free_heap_bytes ESP32 free heap memory\n");
   buffer += buffercat(buffer, "# TYPE esp32_free_heap_bytes gauge\n");
   buffer += bytesAdded(sprintf(buffer, "esp32_free_heap_bytes %d\n\n", ESP.getFreeHeap()));
 
-  // Battery voltage and AC power state
+  // Battery data and AC power on/off state
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data
   buffer += buffercat(buffer, "# HELP esp32_battery_voltage ESP32 LiPo battery voltage (V)\n");
   buffer += buffercat(buffer, "# TYPE esp32_battery_voltage gauge\n");
@@ -316,7 +316,7 @@ void webHandlerMetrics()
   webServer.send(200, "text/plain", webStringBuffer);
 }
 
-//
+// Web handler for chart data. Sends all data streams as a single text/plain data set.
 void webHandlerData()
 {
   if (psramDataSet)
@@ -345,14 +345,14 @@ void setupWebserver()
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // MQTT topics
-const char* MQTT_TOPIC_SPL                  = MQTT_TOPIC_BASE "spl";                   // Current sound level in dB
-const char* MQTT_TOPIC_SPL_AVERAGE          = MQTT_TOPIC_BASE "spl_average";           // Average sound level in dB
-const char* MQTT_TOPIC_SPL_PEAK             = MQTT_TOPIC_BASE "spl_peak";              // Peak sound level in dB
-const char* MQTT_TOPIC_LUX                  = MQTT_TOPIC_BASE "lux";                   // Current light level in Lux
-const char* MQTT_TOPIC_LUX_AVERAGE          = MQTT_TOPIC_BASE "lux_average";           // Average light level in Lux
-const char* MQTT_TOPIC_LUX_PEAK             = MQTT_TOPIC_BASE "lux_peak";              // Peak light level in Lux
-const char* MQTT_TOPIC_LUX_GAIN             = MQTT_TOPIC_BASE "lux_measurement_gain";              // Current light sensor gain setting
-const char* MQTT_TOPIC_LUX_INTEGRATION_TIME = MQTT_TOPIC_BASE "lux_measurement_integration_time";  // Current light sensor integration time (in ms)
+const char* MQTT_TOPIC_SPL                  = MQTT_TOPIC_BASE "sound_level";           // Current sound level in dB
+const char* MQTT_TOPIC_SPL_AVERAGE          = MQTT_TOPIC_BASE "sound_level_average";   // Average sound level in dB
+const char* MQTT_TOPIC_SPL_PEAK             = MQTT_TOPIC_BASE "sound_level_peak";      // Peak sound level in dB
+const char* MQTT_TOPIC_LUX                  = MQTT_TOPIC_BASE "light_level";           // Current light level in Lux
+const char* MQTT_TOPIC_LUX_AVERAGE          = MQTT_TOPIC_BASE "light_level_average";   // Average light level in Lux
+const char* MQTT_TOPIC_LUX_PEAK             = MQTT_TOPIC_BASE "light_level_peak";      // Peak light level in Lux
+const char* MQTT_TOPIC_LUX_GAIN             = MQTT_TOPIC_BASE "light_level_measurement_gain";              // Current light sensor gain setting
+const char* MQTT_TOPIC_LUX_INTEGRATION_TIME = MQTT_TOPIC_BASE "light_level_measurement_integration_time";  // Current light sensor integration time (in ms)
 const char* MQTT_TOPIC_MEASUREMENT_WINDOW   = MQTT_TOPIC_BASE "measurement_window";    // Measurement window size in seconds
 const char* MQTT_TOPIC_UPTIME_DETAIL        = MQTT_TOPIC_BASE "uptime_detail";         // Formatted uptime
 const char* MQTT_TOPIC_UPTIME               = MQTT_TOPIC_BASE "uptime";                // Total uptime in seconds
@@ -400,7 +400,7 @@ void connectMQTT()
 // Send all data to MQTT
 void updateMQTT()
 {
-  // Send sound level information to MQTT
+  // Sound level
   xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data (calculated on a different thread)
   sprintf(mqttStringBuffer, "%0.2f dB", soundSensorSpl);
   mqttClient.publish(MQTT_TOPIC_SPL, mqttStringBuffer, true);
@@ -410,7 +410,7 @@ void updateMQTT()
   mqttClient.publish(MQTT_TOPIC_SPL_PEAK, mqttStringBuffer, true);
   xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
 
-  // Send light level information to MQTT
+  // Light level
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data (calculated on a different thread)
   sprintf(mqttStringBuffer, "%0.2f lux", lightSensorLux);
   mqttClient.publish(MQTT_TOPIC_LUX, mqttStringBuffer, true);
@@ -424,7 +424,7 @@ void updateMQTT()
   mqttClient.publish(MQTT_TOPIC_LUX_INTEGRATION_TIME, mqttStringBuffer, true);
   xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
 
-  // Send the environmentals to MQTT
+  // Environmentals
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   if (environmentSensorOK)
   {
@@ -441,22 +441,22 @@ void updateMQTT()
   }
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
-  // Send the measurement window size to MQTT
+  // Measurement window
   sprintf(mqttStringBuffer, "%d seconds", MEASUREMENT_WINDOW);
   mqttClient.publish(MQTT_TOPIC_MEASUREMENT_WINDOW, mqttStringBuffer, true);
 
-  // Send uptime information to MQTT
+  // Uptime information
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data
   sprintf(mqttStringBuffer, "%lld seconds", timer);
   mqttClient.publish(MQTT_TOPIC_UPTIME, mqttStringBuffer, true);
   mqttClient.publish(MQTT_TOPIC_UPTIME_DETAIL, uptimeStringBuffer, true);
   xSemaphoreGive(xMutexUptime); // Done with uptime data
 
-  // Send free heap size to MQTT
+  // Free heap memory
   sprintf(mqttStringBuffer, "%d", ESP.getFreeHeap());
   mqttClient.publish(MQTT_TOPIC_FREE_HEAP, mqttStringBuffer, true);
 
-  // Send battery data and AC power on/off state to MQTT (calculated on a different thread)
+  // Battery data and AC power on/off state
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
   sprintf(mqttStringBuffer, "%0.2f V", batteryVoltage);
   mqttClient.publish(MQTT_TOPIC_BATTERY_VOLTAGE, mqttStringBuffer, true);
@@ -465,7 +465,7 @@ void updateMQTT()
   mqttClient.publish(MQTT_TOPIC_AC_POWER_STATE, acPowerState ? "1" : "0", true); // 1 for "ON" or 0 for "OFF"
   xSemaphoreGive(xMutexBattery); // Done with battery data
 
-  // Send chip info to MQTT
+  // Chip information
   mqttClient.publish(MQTT_TOPIC_CHIP_INFO, chipInformation, true);
 }
 
@@ -529,19 +529,19 @@ void updateDataSet()
     // Shift all data streams down by one element. The updates below will overwrite the last element in each stream.
     memmove(psramDataSet, psramDataSet + DATA_ELEMENT_SIZE, DATA_SET_SIZE - DATA_ELEMENT_SIZE);
 
-    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
-    addDataElement(0, environmentTemperature);
-    addDataElement(1, environmentHumidity);
-    addDataElement(2, environmentPressure);
-    xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
-
     xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data (calculated on a different thread)
-    addDataElement(3, soundSensorSpl);
+    addDataElement(0, soundSensorSpl);
     xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
 
     xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data (calculated on a different thread)
-    addDataElement(4, lightSensorLux);
+    addDataElement(1, lightSensorLux);
     xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
+
+    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
+    addDataElement(2, environmentTemperature);
+    addDataElement(3, environmentHumidity);
+    addDataElement(4, environmentPressure);
+    xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
     addDataElement(5, timer); // Time index
   }
