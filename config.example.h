@@ -24,7 +24,7 @@ IPAddress webAllowedClients[] = {
 
 // BME280 configuration
 #define BME280_ADDRESS 0x77
-#define BME280_TEMP_F true // Set to false for Celsius
+#define BME280_TEMP_F true           // Set to false for Celsius
 #define BME280_TEMP_ADJUSTMENT -2.25 // Degree adjustment to add to raw temperature readings to compensate for sensor heating (Assumed to be in degrees F if BME280_TEMP_F=true, or in degrees C if BME280_TEMP_F=false)
 
 // SPH0645 I2S sound sensor configuration
@@ -47,15 +47,23 @@ IPAddress webAllowedClients[] = {
 #define MEASUREMENT_WINDOW 60 // Measurements will be averaged with an EMA over this period. It should be similar to the expected Prometheus scrape interval, in seconds.
 
 // Max update delays. Outputs will be refreshed at least this often.
-#define UPDATE_INTERVAL_MQTT    15
-#define UPDATE_INTERVAL_TFT     1  // Must be an odd number due to the display toggling function
+#define UPDATE_INTERVAL_MQTT    60
+#define UPDATE_INTERVAL_TFT     1    // Must be an odd number due to the display toggling function
+#define UPDATE_INTERVAL_DATA    5*60 // Number of seconds between data captures to the PSRAM buffer (5 minutes default)
+
+// PSRAM data storage
+#define DATA_HISTORY_COUNT  2016  // Number of data elements to keep per stream, with one element per UPDATE_INTERVAL_DATA (7 days default = one sample every UPDATE_INTERVAL_DATA seconds = 12 values per hour X 24 X 7)
+#define DATA_ELEMENT_SIZE   10    // Size of one data value as numeric text, with delimiter
+#define DATA_STREAM_COUNT   6     // There are six data streams: sound, light, temperature, humidity, pressure, time. The buffer is also NULL terminated (the +1).
+#define DATA_STREAM_SIZE    DATA_HISTORY_COUNT * DATA_ELEMENT_SIZE // Size of a single data stream in bytes
+#define DATA_SET_SIZE       DATA_STREAM_SIZE * DATA_STREAM_COUNT   // Size of the entire data set in bytes
 
 // MQTT configuration
 const char* MQTT_SERVER   = "192.168.1.60"; // MQTT server name or IP
 const int   MQTT_PORT     = 8883;           // 1883 is the default port for MQTT, 8883 is the default for MQTTS (TLS)
 const char* MQTT_USER     = "MQTT user";    // Null if no authentication is required
 const char* MQTT_PASSWORD = "MQTT pass";    // Null if no authentication is required
-#define     MQTT_TOPIC_BASE  "home/sensors/ambient_upper_attic/"                       // Base topic string for all values from this sensor
+#define     MQTT_TOPIC_BASE "home/sensors/ambient_upper_attic/" // Base topic string for all values from this sensor
 
 // Certificate Authority for TLS connections
 static const char CERT_CA[] = R"EOF(
@@ -64,6 +72,7 @@ static const char CERT_CA[] = R"EOF(
 -----END CERTIFICATE-----
 )EOF";
 
+/*
 // Client cert, issued by the CA
 static const char CERT_CLIENT[] = R"EOF(
 -----BEGIN CERTIFICATE-----
@@ -77,3 +86,4 @@ static const char CERT_CLIENT_KEY[] = R"EOF(
 <Your client cert key>
 -----END PRIVATE KEY-----
 )EOF";
+*/

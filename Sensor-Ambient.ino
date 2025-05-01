@@ -1,41 +1,7 @@
 /**
- * @file Sensor-Ambient.ino
+ * @file  Sensor-Ambient.ino
  * @brief ESP32-based sound, light and environmental sensor with MQTT, TFT display, and web server support
- * 
- * This ESP32-S3 project is designed to monitor ambient sound, light, environmentals and AC power state in areas such
- * as attics, basements, garages, etc. It provides calibrated readings and can be integrated into various home
- * automation platforms through MQTT.
- *
- * Features:
- * - SPH0645 I2S sound sensor for ambient sound level detection
- * - VEML7700 I2C light sensor for ambient light level detection
- * - Environmental monitoring using a BME280 sensor
- * - System uptime tracking
- * - MQTT integration for remote telemetry
- * - HTTP web server with a root page and Prometheus metrics endpoint
- * - TFT display for local visualization of data
- * - LiPo battery voltage monitoring
  */
-
-//TODO: Consider converting uptimeSecondsTotal to milliseconds
-//TODO: Add remote IP restrictions as an array of IP's for NGINX. Can the web server abort a connection?
-//TODO: Allow MQTT to be done without cert and without user/pass, allow MQTT private key auth via define switch with client cert+key, update HTML page with mqtt:// or mqtts://
-
-//TODO: refactor "TFT" stuff to "display"
-//TODO: implement metrics
-//TODO: TFT rotation doesn't seem to work, needs testing, perhaps it's a canvas thing?
-
-/*
-{
-  temp: [100.0,100.0],
-  humidity: [100.0,100.0],
-  pressure: [1000,1000],
-  sound: [100.0,100.0],
-  light: [100000,100000],
-  labels: [123456789,123456789],
-  currentTime: 123456789
-}
-*/
 
 // Libraries
 #include <Arduino.h>
@@ -55,29 +21,9 @@
 #include <Adafruit_BME280.h>      // BME280 support
 #include <hal/efuse_hal.h>        // Espressif ESP32 chip information
 
-// The configuration references objects in the above libraries, so include it after those
-#include <config.h>
-
-// MQTT topics
-const char* MQTT_TOPIC_SPL                  = MQTT_TOPIC_BASE "spl";                   // Current sound level in dB
-const char* MQTT_TOPIC_SPL_AVERAGE          = MQTT_TOPIC_BASE "spl_average";           // Average sound level in dB
-const char* MQTT_TOPIC_SPL_PEAK             = MQTT_TOPIC_BASE "spl_peak";              // Peak sound level in dB
-const char* MQTT_TOPIC_LUX                  = MQTT_TOPIC_BASE "lux";                   // Current light level in Lux
-const char* MQTT_TOPIC_LUX_AVERAGE          = MQTT_TOPIC_BASE "lux_average";           // Average light level in Lux
-const char* MQTT_TOPIC_LUX_PEAK             = MQTT_TOPIC_BASE "lux_peak";              // Peak light level in Lux
-const char* MQTT_TOPIC_LUX_GAIN             = MQTT_TOPIC_BASE "lux_measurement_gain";              // Current light sensor gain setting
-const char* MQTT_TOPIC_LUX_INTEGRATION_TIME = MQTT_TOPIC_BASE "lux_measurement_integration_time";  // Current light sensor integration time (in ms)
-const char* MQTT_TOPIC_MEASUREMENT_WINDOW   = MQTT_TOPIC_BASE "measurement_window";    // Measurement window size in seconds
-const char* MQTT_TOPIC_UPTIME_DETAIL        = MQTT_TOPIC_BASE "uptime_detail";         // Formatted uptime
-const char* MQTT_TOPIC_UPTIME               = MQTT_TOPIC_BASE "uptime";                // Total uptime in seconds
-const char* MQTT_TOPIC_TEMPERATURE          = MQTT_TOPIC_BASE "environmental_temperature";
-const char* MQTT_TOPIC_HUMIDITY             = MQTT_TOPIC_BASE "environmental_humidity";
-const char* MQTT_TOPIC_PRESSURE             = MQTT_TOPIC_BASE "environmental_pressure";
-const char* MQTT_TOPIC_FREE_HEAP            = MQTT_TOPIC_BASE "esp32_free_heap_bytes";  // Current ESP32 free heap size in bytes
-const char* MQTT_TOPIC_BATTERY_VOLTAGE      = MQTT_TOPIC_BASE "esp32_battery_voltage";  // LiPo voltage
-const char* MQTT_TOPIC_BATTERY_PERCENT      = MQTT_TOPIC_BASE "esp32_battery_percent";  // LiPo percent charged
-const char* MQTT_TOPIC_AC_POWER_STATE       = MQTT_TOPIC_BASE "esp32_ac_power_state";   // ON or OFF depending on whether 5V power is available on the USB bus
-const char* MQTT_TOPIC_CHIP_INFO            = MQTT_TOPIC_BASE "esp32_chip_information"; // Info about the ESP32
+// App configuration
+#include <html.h>                 // HTML templates
+#include <config.h>               // The configuration references objects in the above libraries, so include it after those
 
 // ESP32
 char chipInformation[100]; // Chip information buffer
@@ -140,7 +86,7 @@ int lightSensorIntegrationTime = VEML7700_IT_100MS; // Current integration time 
 float lightSensorPeakLevels[MEASUREMENT_WINDOW]; // Track max light levels for each second
 int lightSensorLastTimeIndex = 0; // Last time index into lightSensorPeakLevels[] for tracking peak light levels during each second
 
-//
+// Historical data streams for the web page charts
 unsigned char* psramDataSet;
 char dataFormatBuffer[DATA_ELEMENT_SIZE + 1]; // +1 for NULL terminator
 
@@ -150,230 +96,9 @@ uint64_t lastUpdateTimeTft = 0; // Time of last OLED update
 uint64_t lastUpdateTimeData = 0; // Time of last data set update
 uint64_t timer = 0; // Copy of the main uptime timer that doesn't need a semaphore
 
-// Static HTML template
-const char htmlHeader[] = R"EOF(
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <meta http-equiv="refresh" content="60">
-    <title>ESP32 Sensor - %s</title>
-    <style>
-      table.sensor {
-        border-top: solid 1px black;
-        border-left: solid 1px black;
-      }
-      table.sensor th, table.sensor td {
-        border-right: solid 1px black;
-        border-bottom: solid 1px black;
-      }
-      table.sensor th.header {
-        background-color: #0000CC;
-        color: white;
-        font-size: 24px;
-        font-weight: bold;
-        padding: 5px 10px;
-        text-align: center;
-      }
-      table.sensor th {
-        text-align: left;
-        padding-right: 50px;
-      }
-      table.sensor td {
-        padding-left: 50px;
-        text-align: right;
-      }
-      table.sensor tr.light {
-        background-color: #E8E8FF;
-      }
-      table.sensor tr.environmental {
-        background-color: #D0D0FF;
-      }
-      table.sensor tr.system {
-        background-color: #B8B8FF;
-      }
-      table.sensor tr.chip {
-        background-color: #A0A0FF;
-      }
-      a, a:visited {
-        color: blue;
-      }
-      a:hover {
-        color: purple;
-      }
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script>
-      var jsonData;
-
-      var sensorChartData = {
-        datasets: [
-          {
-            label: 'Sound (dB)',
-            borderColor: 'orange',
-            backgroundColor: 'orange',
-            yAxisID: 'yS',
-            pointRadius: 1
-          },
-          {
-            label: 'Light (lux)',
-            borderColor: 'yellow',
-            backgroundColor: 'yellow',
-            yAxisID: 'yL',
-            pointRadius: 1
-          }
-        ]
-      };
-
-      var sensorChartOptions = {
-        type: 'line',
-        options: {
-          responsive: true,
-          interaction: {
-            mode: 'index',
-            intersect: false,
-          },
-          stacked: false,
-          plugins: {
-            title: {
-              display: true,
-              text: 'Sound and Light'
-            }
-          },
-          scales: {
-            yS: {
-              type: 'linear',
-              display: true,
-              position: 'left',
-              ticks: { color: 'orange' },
-              grid: {
-                drawOnChartArea: false // Only want grid lines for one axis to show up
-              }
-            },
-            yL: {
-              type: 'logarithmic',
-              display: true,
-              position: 'right',
-              ticks: { color: 'yellow' }
-            }
-          }
-        },
-      };
-
-      var environmentalChartData = {
-        datasets: [
-          {
-            label: 'Pressure (mbar)',
-            borderColor: 'blue',
-            backgroundColor: 'blue',
-            yAxisID: 'yP',
-            pointRadius: 1
-          },
-          {
-            label: 'Temperature (F)',
-            borderColor: 'red',
-            backgroundColor: 'red',
-            yAxisID: 'yT',
-            pointRadius: 1
-          },
-          {
-            label: 'Humidity (%%)', // Need double percent symbols because of sprintf()
-            borderColor: 'green',
-            backgroundColor: 'green',
-            yAxisID: 'yH',
-            pointRadius: 1
-          }
-        ]
-      };
-
-      var environmentalChartOptions = {
-        type: 'line',
-        options: {
-          responsive: true,
-          interaction: {
-            mode: 'index',
-            intersect: false,
-          },
-          stacked: false,
-          plugins: {
-            title: {
-              display: true,
-              text: 'Environmentals'
-            }
-          },
-          scales: {
-            yP: {
-              type: 'linear',
-              display: true,
-              position: 'left',
-              ticks: { color: 'blue' },
-              grid: {
-                drawOnChartArea: false // Only want grid lines for one axis to show up
-              }
-            },
-            yT: {
-              type: 'linear',
-              display: true,
-              position: 'right',
-              ticks: { color: 'red' }
-            },
-            yH: {
-              type: 'linear',
-              display: true,
-              position: 'right',
-              ticks: { color: 'green' },
-              grid: {
-                drawOnChartArea: false // Only want grid lines for one axis to show up
-              }
-            }
-          }
-        },
-      };
-
-      document.addEventListener('DOMContentLoaded', function() {
-        fetch('/data')
-        .then(response => {
-            if (response.ok) return response.text(); // The data is in plain text and not JSON
-        })
-        .then(data => {
-          jsonData = JSON.parse('[' + data.trim().slice(0,-1) + ']'); // slice() removes the trailing comma
-          if (jsonData.length)
-          {
-            var streamLength = jsonData.length / 6; // There are six data streams
-            var temperature  = jsonData.slice(0               , streamLength);
-            var humidity     = jsonData.slice(streamLength    , streamLength * 2);
-            var pressure     = jsonData.slice(streamLength * 2, streamLength * 3);
-            var sound        = jsonData.slice(streamLength * 3, streamLength * 4);
-            var light        = jsonData.slice(streamLength * 4, streamLength * 5);
-            var timeIndex    = jsonData.slice(streamLength * 5, streamLength * 6);
-
-            sensorChartData.labels = timeIndex;
-            sensorChartData.datasets[0].data = sound;
-            sensorChartData.datasets[1].data = light;
-            sensorChartOptions.data = sensorChartData;
-            new Chart(document.getElementById('chartSoundLight'), sensorChartOptions);
-
-            environmentalChartData.labels = timeIndex;
-            environmentalChartData.datasets[0].data = pressure;
-            environmentalChartData.datasets[1].data = temperature;
-            environmentalChartData.datasets[2].data = humidity;
-            environmentalChartOptions.data = environmentalChartData;
-            new Chart(document.getElementById('chartEnvironmentals'), environmentalChartOptions);
-          }
-        });
-      });
-    </script>
-  </head>
-  <body>
-)EOF";
-const char htmlFooter[] = R"EOF(
-    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartSoundLight"></canvas></div>
-    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartEnvironmentals"></canvas></div>
-  </body>
-</html>
-)EOF";
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Networking
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // WiFi setup
 void setupWiFi()
@@ -413,6 +138,10 @@ void setupMDNS()
     //MDNS.addServiceText("http", "tcp", "Device", "ESP32"); //Advertise service properties
   }
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Web Server
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Web helper function for using sprintf() to append to the web string buffer
 inline int bytesAdded(int sprintfReturnValue)
@@ -471,7 +200,7 @@ void webHandlerRoot()
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Measurement Window</th><td>%d seconds</td></tr>", MEASUREMENT_WINDOW)); // Formatted uptime
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Measurement Window for Average/Peak Calculations</th><td>%d seconds</td></tr>", MEASUREMENT_WINDOW)); // Formatted uptime
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime</th><td>%lld seconds</td></tr>", uptimeSecondsTotal)); // Raw uptime in seconds
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime Detail</th><td>%s</td></tr>", uptimeStringBuffer)); // Formatted uptime
   xSemaphoreGive(xMutexUptime); // Done with uptime data
@@ -499,38 +228,44 @@ void webHandlerMetrics()
 {
   // Build the HTML response in the web string buffer
   char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
-/*
-  xSemaphoreTake(xMutexSensor, portMAX_DELAY); // Start accessing sensor data (measured on a different thread)
 
-  // AC voltage
-  buffer += buffercat(buffer, "# HELP sensor_ac_voltage Measured AC voltage\n");
-  buffer += buffercat(buffer, "# TYPE sensor_ac_voltage gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "sensor_ac_voltage{measurement=\"RMS\"} %0.1f\n\n", sensorRmsVoltage));
+  // Sound pressure level
+  xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
+  buffer += buffercat(buffer, "# HELP spl Sound Pressure Level (current) (dB)\n");
+  buffer += buffercat(buffer, "# TYPE spl gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "spl %0.2f\n\n", soundSensorSpl));
+  buffer += buffercat(buffer, "# HELP spl_average Sound Pressure Level (average) (dB)\n");
+  buffer += buffercat(buffer, "# TYPE spl_average gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "spl_average %0.2f\n\n", soundSensorSplAverage));
+  buffer += buffercat(buffer, "# HELP spl_peak Sound Pressure Level (peak) (dB)\n");
+  buffer += buffercat(buffer, "# TYPE spl_peak gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "spl_peak %0.2f\n\n", soundSensorSplPeak));
+  xSemaphoreGive(xMutexSoundSensor); // Done with sound data
 
-  // AC power state based on the measured AC voltage
-  buffer += buffercat(buffer, "# HELP sensor_ac_power_state AC power on/off state based on the measured AC voltage\n");
-  buffer += buffercat(buffer, "# TYPE sensor_ac_power_state gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "sensor_ac_power_state %d\n\n", sensorRmsVoltage >= RMS_POWER_OFF_THRESHOLD ? 1 : 0));
+  // Light level
+  xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
+  buffer += buffercat(buffer, "# HELP lux Light Level (current) (lux)\n");
+  buffer += buffercat(buffer, "# TYPE lux gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "lux %0.2f\n\n", lightSensorLux));
+  buffer += buffercat(buffer, "# HELP lux_average Light Level (average) (lux)\n");
+  buffer += buffercat(buffer, "# TYPE lux_average gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "lux_average %0.2f\n\n", lightSensorLuxAverage));
+  buffer += buffercat(buffer, "# HELP lux_peak Light Level (peak) (lux)\n");
+  buffer += buffercat(buffer, "# TYPE lux_peak gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "lux_peak %0.2f\n\n", lightSensorLuxPeak));
+  buffer += buffercat(buffer, "# HELP lux_measurement_gain Light Measurement Gain\n");
+  buffer += buffercat(buffer, "# TYPE lux_measurement_gain gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "lux_measurement_gain %0.3f\n\n", lightSensorGain));
+  buffer += buffercat(buffer, "# HELP lux_measurement_integration_time Light Measurement Integration Time (ms)\n");
+  buffer += buffercat(buffer, "# TYPE lux_measurement_integration_time gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "lux_measurement_integration_time %d\n\n", lightSensorIntegrationTime));
+  xSemaphoreGive(xMutexLightSensor); // Done with light data
 
-  // Add up how many total seconds that the AC power was off by scanning the entire tracking array
-  int secondsOff = 0;
-  for (int i = 0; i < TELEMETRY_SCRAPE_WINDOW; i++)
-  {
-    secondsOff += sensorPowerOutageSeconds[i];
-  }
+  // Measurement window
+  buffer += buffercat(buffer, "# HELP measurement_window Measurement Window for Average/Peak Calculations (seconds)\n");
+  buffer += buffercat(buffer, "# TYPE measurement_window gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "measurement_window %d\n\n", MEASUREMENT_WINDOW));
 
-  // AC power off seconds measured within the scrape window
-  buffer += buffercat(buffer, "# HELP sensor_ac_power_off_seconds How much time the AC power was off during the sensor_ac_power_off_seconds_window monitoring window\n");
-  buffer += buffercat(buffer, "# TYPE sensor_ac_power_off_seconds gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "sensor_ac_power_off_seconds %d\n\n", secondsOff));
-
-  xSemaphoreGive(xMutexSensor); // Done with sensor data
-
-  // The scrape window in seconds
-  buffer += buffercat(buffer, "# HELP sensor_ac_power_off_seconds_window Size of the monitoring window (in seconds) for power outage counts measured in sensor_ac_power_off_seconds\n");
-  buffer += buffercat(buffer, "# TYPE sensor_ac_power_off_seconds_window gauge\n");
-  buffer += bytesAdded(sprintf(buffer, "sensor_ac_power_off_seconds_window %d\n\n", TELEMETRY_SCRAPE_WINDOW));
-*/
   // Environmentals
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   if (environmentSensorOK)
@@ -556,11 +291,17 @@ void webHandlerMetrics()
   buffer += buffercat(buffer, "# TYPE esp32_free_heap_bytes gauge\n");
   buffer += bytesAdded(sprintf(buffer, "esp32_free_heap_bytes %d\n\n", ESP.getFreeHeap()));
 
-  // Battery voltage
+  // Battery voltage and AC power state
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data
-  buffer += buffercat(buffer, "# HELP esp32_battery_voltage ESP32 LiPo battery voltage\n");
+  buffer += buffercat(buffer, "# HELP esp32_battery_voltage ESP32 LiPo battery voltage (V)\n");
   buffer += buffercat(buffer, "# TYPE esp32_battery_voltage gauge\n");
   buffer += bytesAdded(sprintf(buffer, "esp32_battery_voltage %0.2f\n\n", batteryVoltage));
+  buffer += buffercat(buffer, "# HELP esp32_battery_percent ESP32 LiPo battery percent (%)\n");
+  buffer += buffercat(buffer, "# TYPE esp32_battery_percent gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "esp32_battery_percent %0.2f\n\n", batteryPercent));
+  buffer += buffercat(buffer, "# HELP esp32_ac_power_state ESP32 AC Power State\n");
+  buffer += buffercat(buffer, "# TYPE esp32_ac_power_state gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "esp32_ac_power_state %d\n\n", acPowerState));
   xSemaphoreGive(xMutexBattery); // Done with battery data
 
   // Chip information
@@ -599,12 +340,37 @@ void setupWebserver()
   webServer.begin();
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// MQTT
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// MQTT topics
+const char* MQTT_TOPIC_SPL                  = MQTT_TOPIC_BASE "spl";                   // Current sound level in dB
+const char* MQTT_TOPIC_SPL_AVERAGE          = MQTT_TOPIC_BASE "spl_average";           // Average sound level in dB
+const char* MQTT_TOPIC_SPL_PEAK             = MQTT_TOPIC_BASE "spl_peak";              // Peak sound level in dB
+const char* MQTT_TOPIC_LUX                  = MQTT_TOPIC_BASE "lux";                   // Current light level in Lux
+const char* MQTT_TOPIC_LUX_AVERAGE          = MQTT_TOPIC_BASE "lux_average";           // Average light level in Lux
+const char* MQTT_TOPIC_LUX_PEAK             = MQTT_TOPIC_BASE "lux_peak";              // Peak light level in Lux
+const char* MQTT_TOPIC_LUX_GAIN             = MQTT_TOPIC_BASE "lux_measurement_gain";              // Current light sensor gain setting
+const char* MQTT_TOPIC_LUX_INTEGRATION_TIME = MQTT_TOPIC_BASE "lux_measurement_integration_time";  // Current light sensor integration time (in ms)
+const char* MQTT_TOPIC_MEASUREMENT_WINDOW   = MQTT_TOPIC_BASE "measurement_window";    // Measurement window size in seconds
+const char* MQTT_TOPIC_UPTIME_DETAIL        = MQTT_TOPIC_BASE "uptime_detail";         // Formatted uptime
+const char* MQTT_TOPIC_UPTIME               = MQTT_TOPIC_BASE "uptime";                // Total uptime in seconds
+const char* MQTT_TOPIC_TEMPERATURE          = MQTT_TOPIC_BASE "environmental_temperature";
+const char* MQTT_TOPIC_HUMIDITY             = MQTT_TOPIC_BASE "environmental_humidity";
+const char* MQTT_TOPIC_PRESSURE             = MQTT_TOPIC_BASE "environmental_pressure";
+const char* MQTT_TOPIC_FREE_HEAP            = MQTT_TOPIC_BASE "esp32_free_heap_bytes";  // Current ESP32 free heap size in bytes
+const char* MQTT_TOPIC_BATTERY_VOLTAGE      = MQTT_TOPIC_BASE "esp32_battery_voltage";  // LiPo voltage
+const char* MQTT_TOPIC_BATTERY_PERCENT      = MQTT_TOPIC_BASE "esp32_battery_percent";  // LiPo percent charged
+const char* MQTT_TOPIC_AC_POWER_STATE       = MQTT_TOPIC_BASE "esp32_ac_power_state";   // ON or OFF depending on whether 5V power is available on the USB bus
+const char* MQTT_TOPIC_CHIP_INFO            = MQTT_TOPIC_BASE "esp32_chip_information"; // Info about the ESP32
+
 // Setup MQTT connection
 void setupMQTT()
 {
   espClient.setCACert(CERT_CA);
-  //espClient.setCertificate(const char *client_ca); // Client certificate
-  //espClient.setPrivateKey(const char *private_key); // Client certificate key
+  //espClient.setCertificate(const char *CERT_CLIENT); // Client certificate
+  //espClient.setPrivateKey(const char *CERT_CLIENT_KEY); // Client certificate key
   //espClient.setInsecure(); //TODO: Add switch to allow for testing
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
 }
@@ -703,6 +469,10 @@ void updateMQTT()
   mqttClient.publish(MQTT_TOPIC_CHIP_INFO, chipInformation, true);
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// PSRAM Data Storage
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Allocate PSRAM for long-term data storage
 void setupPsram()
 {
@@ -776,6 +546,10 @@ void updateDataSet()
     addDataElement(5, timer); // Time index
   }
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// ST7789 TFT Display
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Setup the TFT ST7789 display
 void setupTFT()
@@ -883,7 +657,11 @@ void updateDisplay()
   display.drawRGBBitmap(0, 0, canvas.getBuffer(), TFT_SCREEN_WIDTH, TFT_SCREEN_HEIGHT);
 }
 
-// Setup the environmental sensor
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// BME280 Environmental Sensor
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Setup the BME280 sensor
 void setupEnvironmentalSensor()
 {
   Serial.println("Environmentals: Initializing BME280");
@@ -951,6 +729,10 @@ void measureEnvironmentals()
     xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
   }
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// VEML7700 Light Sensor
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Setup the VEML7700 light sensor
 void setupLightSensor()
@@ -1034,6 +816,10 @@ void measureLight()
   xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// MAX17048 LiPo Battery Monitor
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Setup the MAX17048 LiPo battery monitor
 void setupBatteryMonitor()
 {
@@ -1076,7 +862,11 @@ void measureBattery()
   xSemaphoreGive(xMutexBattery);
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Read all I2C devices in sequence (background task)
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Each device is read in sequence so that a single task can be used to read all I2C data, and so the timing can be well-controlled
 void readI2CDevices(void *parameter)
 {
   unsigned long timer;
@@ -1098,6 +888,10 @@ void readI2CDevices(void *parameter)
     }
   }
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// SPH0645 I2S Sound Sensor
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Setup the SPH0645 I2S sound sensor
 void setupSoundSensor()
@@ -1181,7 +975,7 @@ void measureSound(void *parameter)
           if (s > maxValue) maxValue = s;
         }
 
-        // Rough calculation of the sound pressure level (SPL) in dB based on the measured range of the samples
+        // Rough calculation of the sound pressure level (SPL) in dB based on the measured samples. It's more like the dB range rather than an absolute dB level.
         float spl = SPL_FACTOR * log10(maxValue - minValue);
 
         // Track peak levels
@@ -1226,13 +1020,16 @@ void measureSound(void *parameter)
   }
 }
 
-// Main setup
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Main Setup
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void setup()
 {
   // Serial port for debugging purposes
   Serial.begin(115200);
 
-  // Allocate PSRAM for long-term data storage, before any other setup that might try and use PSRAM
+  // Allocate a large PSRAM buffer for long-term data storage, before any other setup that might try and use PSRAM
   setupPsram();
 
   // Core features
@@ -1287,7 +1084,10 @@ void setup()
   );
 }
 
-// Main loop
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Main Loop
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void loop()
 {
   // MQTT connection management

@@ -1,0 +1,229 @@
+/**
+ * @file  html.h
+ * @brief HTML templates
+ */
+
+// Static HTML template
+const char htmlHeader[] = R"EOF(
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <meta http-equiv="refresh" content="60">
+    <title>ESP32 Sensor - %s</title>
+    <style>
+      table.sensor {
+        border-top: solid 1px black;
+        border-left: solid 1px black;
+      }
+      table.sensor th, table.sensor td {
+        border-right: solid 1px black;
+        border-bottom: solid 1px black;
+      }
+      table.sensor th.header {
+        background-color: #0000CC;
+        color: white;
+        font-size: 24px;
+        font-weight: bold;
+        padding: 5px 10px;
+        text-align: center;
+      }
+      table.sensor th {
+        text-align: left;
+        padding-right: 50px;
+      }
+      table.sensor td {
+        padding-left: 50px;
+        text-align: right;
+      }
+      table.sensor tr.light {
+        background-color: #E8E8FF;
+      }
+      table.sensor tr.environmental {
+        background-color: #D0D0FF;
+      }
+      table.sensor tr.system {
+        background-color: #B8B8FF;
+      }
+      table.sensor tr.chip {
+        background-color: #A0A0FF;
+      }
+      a, a:visited {
+        color: blue;
+      }
+      a:hover {
+        color: purple;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      var jsonData;
+
+      var sensorChartData = {
+        datasets: [
+          {
+            label: 'Sound (dB)',
+            borderColor: 'cyan',
+            backgroundColor: 'cyan',
+            yAxisID: 'yS',
+            pointRadius: 1
+          },
+          {
+            label: 'Light (lux)',
+            borderColor: 'orange',
+            backgroundColor: 'orange',
+            yAxisID: 'yL',
+            pointRadius: 1
+          }
+        ]
+      };
+
+      var sensorChartOptions = {
+        type: 'line',
+        options: {
+          responsive: true,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          stacked: false,
+          plugins: {
+            title: {
+              display: true,
+              text: 'Sound and Light'
+            }
+          },
+          scales: {
+            yS: {
+              type: 'linear',
+              display: true,
+              position: 'left',
+              ticks: { color: 'cyan' }
+            },
+            yL: {
+              type: 'linear',
+              display: true,
+              position: 'right',
+              ticks: { color: 'orange' },
+              grid: {
+                drawOnChartArea: false // Only want grid lines for one axis to show up
+              }
+            }
+          }
+        },
+      };
+
+      var environmentalChartData = {
+        datasets: [
+          {
+            label: 'Pressure (mbar)',
+            borderColor: 'blue',
+            backgroundColor: 'blue',
+            yAxisID: 'yP',
+            pointRadius: 1
+          },
+          {
+            label: 'Temperature (F)',
+            borderColor: 'red',
+            backgroundColor: 'red',
+            yAxisID: 'yT',
+            pointRadius: 1
+          },
+          {
+            label: 'Humidity (%%)', // Need double percent symbols because of sprintf()
+            borderColor: 'green',
+            backgroundColor: 'green',
+            yAxisID: 'yH',
+            pointRadius: 1
+          }
+        ]
+      };
+
+      var environmentalChartOptions = {
+        type: 'line',
+        options: {
+          responsive: true,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          stacked: false,
+          plugins: {
+            title: {
+              display: true,
+              text: 'Environmentals'
+            }
+          },
+          scales: {
+            yP: {
+              type: 'linear',
+              display: true,
+              position: 'left',
+              ticks: { color: 'blue' },
+              grid: {
+                drawOnChartArea: false // Only want grid lines for one axis to show up
+              }
+            },
+            yT: {
+              type: 'linear',
+              display: true,
+              position: 'right',
+              ticks: { color: 'red' }
+            },
+            yH: {
+              type: 'linear',
+              display: true,
+              position: 'right',
+              ticks: { color: 'green' },
+              grid: {
+                drawOnChartArea: false // Only want grid lines for one axis to show up
+              }
+            }
+          }
+        },
+      };
+
+      document.addEventListener('DOMContentLoaded', function() {
+        fetch('/data')
+        .then(response => {
+            if (response.ok) return response.text(); // The data is in plain text and not JSON
+        })
+        .then(data => {
+          jsonData = JSON.parse('[' + data.trim().slice(0,-1) + ']'); // slice() removes the trailing comma
+          if (jsonData.length)
+          {
+            var streamLength = jsonData.length / 6; // There are six data streams
+            var temperature  = jsonData.slice(0               , streamLength);
+            var humidity     = jsonData.slice(streamLength    , streamLength * 2);
+            var pressure     = jsonData.slice(streamLength * 2, streamLength * 3);
+            var sound        = jsonData.slice(streamLength * 3, streamLength * 4);
+            var light        = jsonData.slice(streamLength * 4, streamLength * 5);
+            var timeIndex    = jsonData.slice(streamLength * 5, streamLength * 6);
+
+            sensorChartData.labels = timeIndex;
+            sensorChartData.datasets[0].data = sound;
+            sensorChartData.datasets[1].data = light;
+            sensorChartOptions.data = sensorChartData;
+            new Chart(document.getElementById('chartSoundLight'), sensorChartOptions);
+
+            environmentalChartData.labels = timeIndex;
+            environmentalChartData.datasets[0].data = pressure;
+            environmentalChartData.datasets[1].data = temperature;
+            environmentalChartData.datasets[2].data = humidity;
+            environmentalChartOptions.data = environmentalChartData;
+            new Chart(document.getElementById('chartEnvironmentals'), environmentalChartOptions);
+          }
+        });
+      });
+    </script>
+  </head>
+  <body>
+)EOF";
+const char htmlFooter[] = R"EOF(
+    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartSoundLight"></canvas></div>
+    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartEnvironmentals"></canvas></div>
+  </body>
+</html>
+)EOF";
