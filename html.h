@@ -65,15 +65,15 @@ const char htmlHeader[] = R"EOF(
         datasets: [
           {
             label: 'Sound (dB)',
-            borderColor: 'magenta',
-            backgroundColor: 'magenta',
+            borderColor: 'blue',
+            backgroundColor: 'blue',
             yAxisID: 'yS',
             pointRadius: 1
           },
           {
             label: 'Light (lux)',
-            borderColor: 'orange',
-            backgroundColor: 'orange',
+            borderColor: 'cyan',
+            backgroundColor: 'cyan',
             yAxisID: 'yL',
             pointRadius: 1
           }
@@ -100,13 +100,13 @@ const char htmlHeader[] = R"EOF(
               type: 'linear',
               display: true,
               position: 'left',
-              ticks: { color: 'magenta' }
+              ticks: { color: 'blue' }
             },
             yL: {
-              type: 'linear',
+              type: 'logarithmic',
               display: true,
               position: 'right',
-              ticks: { color: 'orange' },
+              ticks: { color: 'cyan' },
               grid: {
                 drawOnChartArea: false // Only want grid lines for one axis to show up
               }
@@ -222,8 +222,8 @@ const char htmlHeader[] = R"EOF(
   <body>
 )EOF";
 const char htmlFooter[] = R"EOF(
-    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartSoundLight"></canvas></div>
-    <div style="width: 1500px; height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartEnvironmentals"></canvas></div>
+    <div style="height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartSoundLight"></canvas></div>
+    <div style="height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartEnvironmentals"></canvas></div>
   </body>
 </html>
 )EOF";

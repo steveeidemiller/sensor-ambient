@@ -1,5 +1,5 @@
 // Network configuration
-const char* WIFI_HOSTNAME = "Sensor-Ambient-1"; // Network hostname for the ESP32
+const char* WIFI_HOSTNAME = "Sensor-Ambient-1"; // Network hostname for the ESP32, such as "Sensor-Upper-Attic", and should be similar to MQTT_TOPIC_BASE below
 const char* WIFI_SSID =     "Wifi Network";
 const char* WIFI_PASSWORD = "Wifi Password";
 #define   WIFI_STATIC_IP    true // True to use a static IP (specified using the following parameters), or false to use DHCP
@@ -63,7 +63,7 @@ const char* MQTT_SERVER   = "192.168.1.60"; // MQTT server name or IP
 const int   MQTT_PORT     = 8883;           // 1883 is the default port for MQTT, 8883 is the default for MQTTS (TLS)
 const char* MQTT_USER     = "MQTT user";    // Null if no authentication is required
 const char* MQTT_PASSWORD = "MQTT pass";    // Null if no authentication is required
-#define     MQTT_TOPIC_BASE "home/sensors/ambient_upper_attic/" // Base topic string for all values from this sensor
+#define     MQTT_TOPIC_BASE "home/sensors/ambient_1/" // Base topic string for all values from this sensor
 
 // Certificate Authority for TLS connections
 static const char CERT_CA[] = R"EOF(
