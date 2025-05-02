@@ -169,7 +169,7 @@ void webHandlerRoot()
 
   // Build the HTML response in the web string buffer
   char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
-  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME)); // Hostname gets added to the HTML <title> inside the template header
+  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME, esp_timer_get_time() / 1000000)); // Hostname gets added to the HTML <title> inside the template header, and the ESP32 current seconds counter is used by JavaScript for the charts
   buffer += buffercat(buffer, "<table class=\"sensor\" cellspacing=\"0\" cellpadding=\"3\">"); // Sensor data table
   buffer += bytesAdded(sprintf(buffer, "<tr><th colspan=\"2\" class=\"header\">%s</th></tr>", WIFI_HOSTNAME)); // Network hostname
 

@@ -60,6 +60,7 @@ const char htmlHeader[] = R"EOF(
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
       var jsonData;
+      var esp32Time = %lld;
 
       var sensorChartData = {
         datasets: [
@@ -202,6 +203,15 @@ const char htmlHeader[] = R"EOF(
             var pressure     = jsonData.slice(streamLength * 4, streamLength * 5);
             var timeIndex    = jsonData.slice(streamLength * 5, streamLength * 6);
 
+            // Convert the ESP32 timestamps to local time in the browser
+            var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+            var now = Date.now(); // ms
+            for (var i = 0; i < timeIndex.length; i++)
+            {
+              var date = new Date(now - (esp32Time - timeIndex[i]) * 1000);
+              timeIndex[i] = days[date.getDay()] + ' ' + date.toLocaleDateString().slice(0,-5) + ' ' + date.toLocaleTimeString();
+            }
+
             sensorChartData.labels = timeIndex;
             sensorChartData.datasets[0].data = sound;
             sensorChartData.datasets[1].data = light;
@@ -222,8 +232,8 @@ const char htmlHeader[] = R"EOF(
   <body>
 )EOF";
 const char htmlFooter[] = R"EOF(
-    <div style="height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartSoundLight"></canvas></div>
-    <div style="height: 400px; margin-top: 20px;"><canvas style="width: 1500px; height: 400px;" id="chartEnvironmentals"></canvas></div>
+    <div style="height: 500px; margin-top: 20px;"><canvas style="width: 1500px; height: 500px;" id="chartSoundLight"></canvas></div>
+    <div style="height: 500px; margin-top: 20px;"><canvas style="width: 1500px; height: 500px;" id="chartEnvironmentals"></canvas></div>
   </body>
 </html>
 )EOF";
