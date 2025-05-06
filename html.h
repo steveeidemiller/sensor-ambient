@@ -12,11 +12,13 @@ const char htmlHeader[] = R"EOF(
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
     <meta http-equiv="refresh" content="60">
-    <title>ESP32 Sensor - %s</title>
+    <title>%s</title>
     <style>
       table.sensor {
         border-top: solid 1px black;
         border-left: solid 1px black;
+        margin-left: auto;
+        margin-right: auto;
       }
       table.sensor th, table.sensor td {
         border-right: solid 1px black;
@@ -56,6 +58,17 @@ const char htmlHeader[] = R"EOF(
       a:hover {
         color: purple;
       }
+      div.chartContainer {
+        width: 1500px;
+        height: 475px;
+        margin-top: 20px;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      canvas.chart {
+        width: 1500px;
+        height: 475px;
+      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
@@ -85,6 +98,7 @@ const char htmlHeader[] = R"EOF(
         type: 'line',
         options: {
           responsive: true,
+          maintainAspectRatio: false,
           interaction: {
             mode: 'index',
             intersect: false,
@@ -92,7 +106,7 @@ const char htmlHeader[] = R"EOF(
           stacked: false,
           plugins: {
             title: {
-              display: true,
+              display: false,
               text: 'Sound and Light'
             }
           },
@@ -133,7 +147,7 @@ const char htmlHeader[] = R"EOF(
             pointRadius: 1
           },
           {
-            label: 'Humidity (%%)', // Need double percent symbols because of sprintf()
+            label: 'Humidity (%%)', // Need double percent symbols because of sprintf() in the C code
             borderColor: 'green',
             backgroundColor: 'green',
             yAxisID: 'yH',
@@ -146,6 +160,7 @@ const char htmlHeader[] = R"EOF(
         type: 'line',
         options: {
           responsive: true,
+          maintainAspectRatio: false,
           interaction: {
             mode: 'index',
             intersect: false,
@@ -153,7 +168,7 @@ const char htmlHeader[] = R"EOF(
           stacked: false,
           plugins: {
             title: {
-              display: true,
+              display: false,
               text: 'Environmentals'
             }
           },
@@ -232,8 +247,8 @@ const char htmlHeader[] = R"EOF(
   <body>
 )EOF";
 const char htmlFooter[] = R"EOF(
-    <div style="height: 500px; margin-top: 20px;"><canvas style="width: 1500px; height: 500px;" id="chartSoundLight"></canvas></div>
-    <div style="height: 500px; margin-top: 20px;"><canvas style="width: 1500px; height: 500px;" id="chartEnvironmentals"></canvas></div>
+    <div class="chartContainer"><canvas class="chart" id="chartSoundLight"></canvas></div>
+    <div class="chartContainer"><canvas class="chart" id="chartEnvironmentals"></canvas></div>
   </body>
 </html>
 )EOF";
