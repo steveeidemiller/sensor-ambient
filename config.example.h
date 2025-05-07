@@ -16,6 +16,12 @@ IPAddress webAllowedClients[] = {
   //IPAddress(192, 168, 1, 1)
 };
 
+// NTP for system time
+#define NTP_TIMEZONE "CST6CDT,M3.2.0,M11.1.0" // POSIX timezone string which can include daylight savings information if desired. Reference: https://github.com/nayarsystems/posix_tz_db/blob/master/zones.json
+#define NTP_SERVER_1 "us.pool.ntp.org"        // NTP pool server within an appropriate region. Reference: https://www.ntppool.org
+#define NTP_SERVER_2 "time.nist.gov"          // Alternate NTP pool, or set to NTP_SERVER_1
+#define NTP_SERVER_3 "192.168.1.1"            // Alternate NTP pool, or set to NTP_SERVER_1
+
 // TFT display configuration
 #define TFT_SCREEN_WIDTH  240
 #define TFT_SCREEN_HEIGHT 135

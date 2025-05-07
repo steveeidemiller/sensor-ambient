@@ -20,6 +20,7 @@
 #include <Adafruit_Sensor.h>      // BME280 support
 #include <Adafruit_BME280.h>      // BME280 support
 #include <hal/efuse_hal.h>        // Espressif ESP32 chip information
+#include <time.h>                 // NTP and time support
 
 // App configuration
 #include <html.h>                 // HTML templates
@@ -28,18 +29,20 @@
 // ESP32
 char chipInformation[100]; // Chip information buffer
 
-// Web server configuration
+// Web server
 WebServer webServer(80);
 char webStringBuffer[12 * 1024];
+struct tm webTimeInfo; // NTP
 
-// MQTT configuration
+// MQTT
 //WiFiClient espClient;
 WiFiClientSecure espClient; // Use WiFiClientSecure for SSL/TLS MQTT connections
 PubSubClient mqttClient(espClient);
 unsigned long mqttLastConnectionAttempt = 0;
-char mqttStringBuffer[20];
+char mqttStringBuffer[40];
+struct tm mqttTimeInfo; // NTP
 
-// TFT display configuration
+// TFT display
 Adafruit_ST7789 display = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(TFT_SCREEN_WIDTH, TFT_SCREEN_HEIGHT);
 int64_t displayTimer = 0; // Timestamp of the last button press used to turn on the display
@@ -64,7 +67,7 @@ int lightSensorIntegrationTime = VEML7700_IT_100MS; // Current integration time 
 float lightSensorPeakLevels[MEASUREMENT_WINDOW]; // Track max light levels for each second
 int lightSensorLastTimeIndex = 0; // Last time index into lightSensorPeakLevels[] for tracking peak light levels during each second
 
-// BME280 configuration
+// BME280
 Adafruit_BME280 bme280;
 SemaphoreHandle_t xMutexEnvironmental; // Mutex to protect shared variables between tasks
 bool  environmentSensorOK; // True if the sensor data is OK, false if not
@@ -214,6 +217,10 @@ void webHandlerRoot()
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>MQTT Server</th><td>%s mqtts://%s:%d</td></tr>", mqttClient.connected() ? "Connected to" : "Disconnected from ", MQTT_SERVER, MQTT_PORT)); // MQTT connection
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>IP Address</th><td>%d.%d.%d.%d</td></tr>", ip[0], ip[1], ip[2], ip[3])); // Network address
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>WiFi Signal Strength (%s)</th><td>%d dBm</td></tr>", WIFI_SSID, WiFi.RSSI())); // Network address
+  if (getLocalTime(&webTimeInfo))
+  {
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>System Time</th><td>%02d/%02d/%02d %02d:%02d:%02d</td></tr>", timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_year + 1900, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec));
+  }
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Chip Information</th><td>%s</td></tr>", chipInformation)); // ESP32 chipset information
   buffer += buffercat(buffer, "</table>"); // Sensor data table
   buffer += buffercat(buffer, htmlFooter); // HTML template footer
@@ -448,6 +455,13 @@ void updateMQTT()
   // WiFi signal strength
   sprintf(mqttStringBuffer, "%d", WiFi.RSSI());
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_wifi_signal_strength_dbm", mqttStringBuffer, true);
+
+  // NTP system time
+  if (getLocalTime(&mqttTimeInfo))
+  {
+    sprintf(mqttStringBuffer, "%02d/%02d/%d %02d:%02d:%02d", timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_year + 1900, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
+    mqttClient.publish(MQTT_TOPIC_BASE "esp32_system_time", mqttStringBuffer, true);
+  }
 
   // Chip information
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_chip_information", chipInformation, true);
@@ -1022,6 +1036,7 @@ void setup()
   setupMDNS();
   setupWebserver();
   setupMQTT();
+  configTzTime(NTP_TIMEZONE, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3); // NTP
 
   // Sensor setup
   delay(200); // Allow the sensor modules time to initialize after powering on
