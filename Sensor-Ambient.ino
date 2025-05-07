@@ -32,15 +32,12 @@ char chipInformation[100]; // Chip information buffer
 // Web server
 WebServer webServer(80);
 char webStringBuffer[12 * 1024];
-struct tm webTimeInfo; // NTP
 
 // MQTT
 //WiFiClient espClient;
 WiFiClientSecure espClient; // Use WiFiClientSecure for SSL/TLS MQTT connections
 PubSubClient mqttClient(espClient);
 unsigned long mqttLastConnectionAttempt = 0;
-char mqttStringBuffer[40];
-struct tm mqttTimeInfo; // NTP
 
 // TFT display
 Adafruit_ST7789 display = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
@@ -79,7 +76,7 @@ float environmentPressure;
 SemaphoreHandle_t xMutexUptime; // Mutex to protect shared variables between tasks
 int64_t uptimeSecondsTotal, uptimeDays, uptimeHours, uptimeMinutes, uptimeSeconds;
 int64_t lastUptimeSecondsTotal = 0;
-char uptimeStringBuffer[24];
+char uptimeStringBuffer[24]; // Used by multiple threads
 
 // LiPo battery and AC power state
 SemaphoreHandle_t xMutexBattery; // Mutex to protect shared variables between tasks
@@ -90,7 +87,6 @@ int acPowerState; // Is set to 1 when 5V is present on the USB bus (AC power is 
 
 // Historical data streams for the web page charts
 unsigned char* psramDataSet;
-char dataFormatBuffer[DATA_ELEMENT_SIZE + 1]; // +1 for NULL terminator
 
 // Main loop
 uint64_t lastUpdateTimeMqtt = 0; // Time of last MQTT update
@@ -169,6 +165,7 @@ void webHandler404()
 void webHandlerRoot()
 {
   IPAddress ip = WiFi.localIP();
+  struct tm timeInfo; // NTP
 
   // Build the HTML response in the web string buffer
   char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
@@ -217,7 +214,7 @@ void webHandlerRoot()
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>MQTT Server</th><td>%s mqtts://%s:%d</td></tr>", mqttClient.connected() ? "Connected to" : "Disconnected from ", MQTT_SERVER, MQTT_PORT)); // MQTT connection
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>IP Address</th><td>%d.%d.%d.%d</td></tr>", ip[0], ip[1], ip[2], ip[3])); // Network address
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>WiFi Signal Strength (%s)</th><td>%d dBm</td></tr>", WIFI_SSID, WiFi.RSSI())); // Network address
-  if (getLocalTime(&webTimeInfo))
+  if (getLocalTime(&timeInfo))
   {
     buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>System Time</th><td>%02d/%02d/%02d %02d:%02d:%02d</td></tr>", timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_year + 1900, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec));
   }
@@ -391,6 +388,9 @@ void connectMQTT()
 // Send all data to MQTT
 void updateMQTT()
 {
+  char mqttStringBuffer[25];
+  struct tm timeInfo; // NTP
+
   // Sound level
   xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data (calculated on a different thread)
   sprintf(mqttStringBuffer, "%0.2f", soundSensorSpl);
@@ -457,7 +457,7 @@ void updateMQTT()
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_wifi_signal_strength_dbm", mqttStringBuffer, true);
 
   // NTP system time
-  if (getLocalTime(&mqttTimeInfo))
+  if (getLocalTime(&timeInfo))
   {
     sprintf(mqttStringBuffer, "%02d/%02d/%d %02d:%02d:%02d", timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_year + 1900, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
     mqttClient.publish(MQTT_TOPIC_BASE "esp32_system_time", mqttStringBuffer, true);
@@ -504,6 +504,7 @@ void setupPsram()
 // Overloaded helper function to format a data value and put it at the end of the specified data stream (overwriting the end value/slot)
 void addDataElement(int stream, float value)
 {
+  char dataFormatBuffer[DATA_ELEMENT_SIZE + 1]; // +1 for NULL terminator
   memset(dataFormatBuffer, ' ', DATA_ELEMENT_SIZE);   // Fill with spaces
   int n = sprintf(dataFormatBuffer, "%0.2f,", value); // Format the value with delimiter and NULL terminator
   if (n > 0) dataFormatBuffer[n] = ' ';               // Remove sprintf() NULL terminator
@@ -512,6 +513,7 @@ void addDataElement(int stream, float value)
 }
 void addDataElement(int stream, uint64_t value)
 {
+  char dataFormatBuffer[DATA_ELEMENT_SIZE + 1]; // +1 for NULL terminator
   memset(dataFormatBuffer, ' ', DATA_ELEMENT_SIZE);   // Fill with spaces
   int n = sprintf(dataFormatBuffer, "%lld,", value);  // Format the value with delimiter and NULL terminator
   if (n > 0) dataFormatBuffer[n] = ' ';               // Remove sprintf() NULL terminator
