@@ -79,8 +79,8 @@ const char htmlHeader[] = R"EOF(
         datasets: [
           {
             label: 'Sound (dB)',
-            borderColor: 'blue',
-            backgroundColor: 'blue',
+            borderColor: 'purple',
+            backgroundColor: 'purple',
             yAxisID: 'yS',
             pointRadius: 1
           },
@@ -115,7 +115,7 @@ const char htmlHeader[] = R"EOF(
               type: 'linear',
               display: true,
               position: 'left',
-              ticks: { color: 'blue' }
+              ticks: { color: 'purple' }
             },
             yL: {
               type: 'logarithmic',

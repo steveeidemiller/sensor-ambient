@@ -30,7 +30,7 @@ char chipInformation[100]; // Chip information buffer
 
 // Web server configuration
 WebServer webServer(80);
-char webStringBuffer[10 * 1024];
+char webStringBuffer[12 * 1024];
 
 // MQTT configuration
 //WiFiClient espClient;
@@ -213,6 +213,7 @@ void webHandlerRoot()
 
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>MQTT Server</th><td>%s mqtts://%s:%d</td></tr>", mqttClient.connected() ? "Connected to" : "Disconnected from ", MQTT_SERVER, MQTT_PORT)); // MQTT connection
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>IP Address</th><td>%d.%d.%d.%d</td></tr>", ip[0], ip[1], ip[2], ip[3])); // Network address
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>WiFi Signal Strength (%s)</th><td>%d dBm</td></tr>", WIFI_SSID, WiFi.RSSI())); // Network address
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Chip Information</th><td>%s</td></tr>", chipInformation)); // ESP32 chipset information
   buffer += buffercat(buffer, "</table>"); // Sensor data table
   buffer += buffercat(buffer, htmlFooter); // HTML template footer
@@ -302,6 +303,11 @@ void webHandlerMetrics()
   buffer += buffercat(buffer, "# TYPE esp32_ac_power_state gauge\n");
   buffer += bytesAdded(sprintf(buffer, "esp32_ac_power_state %d\n\n", acPowerState));
   xSemaphoreGive(xMutexBattery); // Done with battery data
+
+  // WiFi signal strength
+  buffer += buffercat(buffer, "# HELP esp32_wifi_signal_strength ESP32 WiFi signal strength\n");
+  buffer += buffercat(buffer, "# TYPE esp32_wifi_signal_strength gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "esp32_wifi_signal_strength{SSID=\"%s\"} %d\n\n", WIFI_SSID, WiFi.RSSI()));
 
   // Chip information
   buffer += buffercat(buffer, "# HELP esp32_chip_information ESP32 chip information\n");
@@ -438,6 +444,10 @@ void updateMQTT()
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_battery_percent", mqttStringBuffer, true);
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_ac_power_state", acPowerState ? "1" : "0", true); // 1 for "ON" or 0 for "OFF"
   xSemaphoreGive(xMutexBattery); // Done with battery data
+
+  // WiFi signal strength
+  sprintf(mqttStringBuffer, "%d", WiFi.RSSI());
+  mqttClient.publish(MQTT_TOPIC_BASE "esp32_wifi_signal_strength_dbm", mqttStringBuffer, true);
 
   // Chip information
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_chip_information", chipInformation, true);
