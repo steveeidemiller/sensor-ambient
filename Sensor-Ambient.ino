@@ -67,8 +67,9 @@ int lightSensorLastTimeIndex = 0; // Last time index into lightSensorPeakLevels[
 // BME280
 Adafruit_BME280 bme280;
 SemaphoreHandle_t xMutexEnvironmental; // Mutex to protect shared variables between tasks
-bool  environmentSensorOK; // True if the sensor data is OK, false if not
-float environmentTemperature;
+bool  environmentSensorOK;    // True if the sensor data is OK, false if not
+float environmentTemperature; // Always in C and converted to F on output if BME280_TEMP_F is true
+float environmentDewPoint;    // Always in C and converted to F on output if BME280_TEMP_F is true
 float environmentHumidity;
 float environmentPressure;
 
@@ -169,7 +170,7 @@ void webHandlerRoot()
 
   // Build the HTML response in the web string buffer
   char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
-  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME, esp_timer_get_time() / 1000000)); // Hostname gets added to the HTML <title> inside the template header, and the ESP32 current seconds counter is used by JavaScript for the charts
+  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME, esp_timer_get_time() / 1000000, BME280_TEMP_F ? "F" : "C")); // Hostname gets added to the HTML <title> inside the template header, and the ESP32 current seconds counter and temperature units are used by JavaScript for the charts
   buffer += buffercat(buffer, "<table class=\"sensor\" cellspacing=\"0\" cellpadding=\"3\">"); // Sensor data table
   buffer += bytesAdded(sprintf(buffer, "<tr><th colspan=\"2\" class=\"header\">%s</th></tr>", WIFI_HOSTNAME)); // Network hostname
 
@@ -190,9 +191,11 @@ void webHandlerRoot()
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Sensor OK?</th><td>%s</td></tr>", environmentSensorOK ? "1 (Yes)" : "0 (No)")); // Environment sensor OK?
   #if defined(BME280_TEMP_F)
-    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Temperature</th><td>%0.1f&deg; F</td></tr>", environmentTemperature)); // Environment temperature
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Temperature</th><td>%0.1f&deg; F</td></tr>", environmentTemperature * 9.0F / 5.0F + 32.0F)); // Environment temperature
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Dew Point</th><td>%0.1f&deg; F</td></tr>", environmentDewPoint * 9.0F / 5.0F + 32.0F)); // Environment dew point
   #else
     buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Temperature</th><td>%0.1f&deg; C</td></tr>", environmentTemperature)); // Environment temperature
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Dew Point</th><td>%0.1f&deg; C</td></tr>", environmentDewPoint)); // Environment dew point
   #endif
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Humidity</th><td>%0.1f%%</td></tr>", environmentHumidity)); // Environment humidiy
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Barometric Pressure</th><td>%0.1f mbar</td></tr>", environmentPressure)); // Environment barometric pressure
@@ -271,11 +274,19 @@ void webHandlerMetrics()
   {
     #if defined(BME280_TEMP_F)
       buffer += buffercat(buffer, "# HELP environmental_temperature Environment temperature (F)\n");
+      buffer += buffercat(buffer, "# TYPE environmental_temperature gauge\n");
+      buffer += bytesAdded(sprintf(buffer, "environmental_temperature %0.1f\n\n", environmentTemperature * 9.0F / 5.0F + 32.0F));
+      buffer += buffercat(buffer, "# HELP environmental_dew_point Environment dew point (F)\n");
+      buffer += buffercat(buffer, "# TYPE environmental_dew_point gauge\n");
+      buffer += bytesAdded(sprintf(buffer, "environmental_dew_point %0.1f\n\n", environmentDewPoint * 9.0F / 5.0F + 32.0F));
     #else
       buffer += buffercat(buffer, "# HELP environmental_temperature Environment temperature (C)\n");
+      buffer += buffercat(buffer, "# TYPE environmental_temperature gauge\n");
+      buffer += bytesAdded(sprintf(buffer, "environmental_temperature %0.1f\n\n", environmentTemperature));
+      buffer += buffercat(buffer, "# HELP environmental_dew_point Environment dew point (F)\n");
+      buffer += buffercat(buffer, "# TYPE environmental_dew_point gauge\n");
+      buffer += bytesAdded(sprintf(buffer, "environmental_dew_point %0.1f\n\n", environmentDewPoint));
     #endif
-    buffer += buffercat(buffer, "# TYPE environmental_temperature gauge\n");
-    buffer += bytesAdded(sprintf(buffer, "environmental_temperature %0.1f\n\n", environmentTemperature));
     buffer += buffercat(buffer, "# HELP environmental_humidity Environment humidity (RH%)\n");
     buffer += buffercat(buffer, "# TYPE environmental_humidity gauge\n");
     buffer += bytesAdded(sprintf(buffer, "environmental_humidity %0.1f\n\n", environmentHumidity));
@@ -421,6 +432,8 @@ void updateMQTT()
   {
     sprintf(mqttStringBuffer, "%0.1f", environmentTemperature); // Regardless of F or C units, just report the number to MQTT
     mqttClient.publish(MQTT_TOPIC_BASE "environmental_temperature", mqttStringBuffer, true);
+    sprintf(mqttStringBuffer, "%0.1f", environmentDewPoint); // Regardless of F or C units, just report the number to MQTT
+    mqttClient.publish(MQTT_TOPIC_BASE "environmental_dew_point", mqttStringBuffer, true);
     sprintf(mqttStringBuffer, "%0.1f", environmentHumidity);
     mqttClient.publish(MQTT_TOPIC_BASE "environmental_humidity", mqttStringBuffer, true);
     sprintf(mqttStringBuffer, "%0.1f", environmentPressure);
@@ -538,7 +551,7 @@ void updateDataSet()
     xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
 
     xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
-    addDataElement(2, environmentTemperature);
+    addDataElement(2, environmentTemperature); // Always in Celsius
     addDataElement(3, environmentHumidity);
     addDataElement(4, environmentPressure);
     xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
@@ -627,7 +640,7 @@ void updateDisplay()
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   canvas.setTextColor(ST77XX_GREEN);
   #if defined(BME280_TEMP_F)
-    canvas.printf("%0.1fF   %0.1f%%   %0.0f mbar", environmentTemperature, environmentHumidity, environmentPressure);
+    canvas.printf("%0.1fF   %0.1f%%   %0.0f mbar", environmentTemperature * 9.0F / 5.0F + 32.0F, environmentHumidity, environmentPressure);
   #else
     canvas.printf("%0.1fC   %0.1f%%   %0.0f mbar", environmentTemperature, environmentHumidity, environmentPressure);
   #endif
@@ -678,12 +691,12 @@ void measureEnvironmentals()
 
   // Read the environmental data
   #if defined(BME280_TEMP_F)
-    t = bme280.readTemperature() * 9 / 5 + 32 + BME280_TEMP_ADJUSTMENT;
+    t = bme280.readTemperature() + BME280_TEMP_ADJUSTMENT * 5.0F / 9.0F; // BME280_TEMP_ADJUSTMENT needs to be converted to C here (just a ratio, not an actual temperature, so subtracting 32F isn't necessary)
   #else
     t = bme280.readTemperature() + BME280_TEMP_ADJUSTMENT;
   #endif
   h = bme280.readHumidity();
-  p = bme280.readPressure() / 100.0;
+  p = bme280.readPressure() / 100.0F;
 
   // Is there any trouble with the sensor data?
   if (!(t < -50 || t > 200 || h < 0 || h > 100 || p < 700 || p > 1300))
@@ -715,6 +728,12 @@ void measureEnvironmentals()
         environmentHumidity = (environmentHumidity * (MEASUREMENT_WINDOW - 1) + h) / MEASUREMENT_WINDOW;
         environmentPressure = (environmentPressure * (MEASUREMENT_WINDOW - 1) + p) / MEASUREMENT_WINDOW;
       }
+
+      // Dew point calculation using the Magnus formula. Reference: https://en.wikipedia.org/wiki/Dew_point#Calculating_the_dew_point
+      // NOTE: This is effectively "smoothed" due to reliance on the EMA-smoothed temperature and humidity values
+      float magnusGammaTRH = (float)log(environmentHumidity / 100.0F) + 17.625F * environmentTemperature / (243.04F + environmentTemperature);
+      environmentDewPoint = 243.04F * magnusGammaTRH / (17.625F - magnusGammaTRH); // Always in C and converted to F on output if BME280_TEMP_F is true
+
       environmentSensorOK = true;
       xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
     }

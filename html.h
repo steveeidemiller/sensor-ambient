@@ -61,9 +61,10 @@ const char htmlHeader[] = R"EOF(
       div.chartContainer {
         width: 1500px;
         height: 475px;
-        margin-top: 20px;
+        margin-top: 40px;
         margin-left: auto;
         margin-right: auto;
+        text-align: center;
       }
       canvas.chart {
         width: 1500px;
@@ -74,6 +75,7 @@ const char htmlHeader[] = R"EOF(
     <script>
       var jsonData;
       var esp32Time = %lld;
+      var tempUnits = '%s';
 
       var sensorChartData = {
         datasets: [
@@ -140,11 +142,19 @@ const char htmlHeader[] = R"EOF(
             pointRadius: 1
           },
           {
-            label: 'Temperature (F)',
+            label: 'Temperature (' + tempUnits + ')',
             borderColor: 'red',
             backgroundColor: 'red',
             yAxisID: 'yT',
             pointRadius: 1
+          },
+          {
+            label: 'Dew Point (' + tempUnits + ')',
+            borderColor: '#00CC00',
+            backgroundColor: '#00CC00',
+            yAxisID: 'yD', // Change to 'yT' to share the Temperature axis, then remove the 'yD' definition in 'scales' below
+            pointRadius: 1,
+            hidden: true // Initially hide the dew point graph to keep the chart from looking too busy
           },
           {
             label: 'Humidity (%%)', // Need double percent symbols because of sprintf() in the C code
@@ -188,6 +198,15 @@ const char htmlHeader[] = R"EOF(
               position: 'right',
               ticks: { color: 'red' }
             },
+            yD: {
+              type: 'linear',
+              display: true,
+              position: 'right',
+              ticks: { color: '#00CC00' },
+              grid: {
+                drawOnChartArea: false // Only want grid lines for one axis to show up
+              }
+            },
             yH: {
               type: 'linear',
               display: true,
@@ -213,7 +232,7 @@ const char htmlHeader[] = R"EOF(
             var streamLength = jsonData.length / 6; // There are six data streams
             var sound        = jsonData.slice(0               , streamLength);
             var light        = jsonData.slice(streamLength    , streamLength * 2);
-            var temperature  = jsonData.slice(streamLength * 2, streamLength * 3);
+            var temperature  = jsonData.slice(streamLength * 2, streamLength * 3); // Always in Celsius
             var humidity     = jsonData.slice(streamLength * 3, streamLength * 4);
             var pressure     = jsonData.slice(streamLength * 4, streamLength * 5);
             var timeIndex    = jsonData.slice(streamLength * 5, streamLength * 6);
@@ -233,10 +252,26 @@ const char htmlHeader[] = R"EOF(
             sensorChartOptions.data = sensorChartData;
             new Chart(document.getElementById('chartSoundLight'), sensorChartOptions);
 
+            // Calculate dew point and convert temperature[]  to Fahrenheit if needed
+            var dewPoint = [];
+            for (var i = 0; i < temperature.length; i++)
+            {
+              var t = temperature[i]; // Celsius
+              var magnusGammaTRH = Math.log(humidity[i] / 100.0) + 17.625 * t / (243.04 + t);
+              var d = 243.04 * magnusGammaTRH / (17.625 - magnusGammaTRH);
+              if (tempUnits == 'F')
+              {
+                d = d * 9.0 / 5.0 + 32.0;
+                temperature[i] = t * 9.0 / 5.0 + 32.0;
+              }
+              dewPoint.push(d);
+            }
+
             environmentalChartData.labels = timeIndex;
             environmentalChartData.datasets[0].data = pressure;
             environmentalChartData.datasets[1].data = temperature;
-            environmentalChartData.datasets[2].data = humidity;
+            environmentalChartData.datasets[2].data = dewPoint;
+            environmentalChartData.datasets[3].data = humidity;
             environmentalChartOptions.data = environmentalChartData;
             new Chart(document.getElementById('chartEnvironmentals'), environmentalChartOptions);
           }
@@ -247,8 +282,8 @@ const char htmlHeader[] = R"EOF(
   <body>
 )EOF";
 const char htmlFooter[] = R"EOF(
-    <div class="chartContainer"><canvas class="chart" id="chartSoundLight"></canvas></div>
-    <div class="chartContainer"><canvas class="chart" id="chartEnvironmentals"></canvas></div>
+    <div class="chartContainer">Click on captions to enable/disable graphs<br/><canvas class="chart" id="chartSoundLight"></canvas></div>
+    <div class="chartContainer">Click on captions to enable/disable graphs<br/><canvas class="chart" id="chartEnvironmentals"></canvas></div>
   </body>
 </html>
 )EOF";
