@@ -17,8 +17,7 @@
 #include <Adafruit_ST7789.h>      // TFT display support
 #include <Fonts/FreeSans9pt7b.h>  // TFT display support
 //#include <Fonts/FreeSans12pt7b.h> // TFT display support
-#include <Adafruit_Sensor.h>      // BME280 support
-#include <Adafruit_BME280.h>      // BME280 support
+#include <bsec2.h>                // BME680 support
 #include <hal/efuse_hal.h>        // Espressif ESP32 chip information
 #include <time.h>                 // NTP and time support
 
@@ -31,11 +30,11 @@ char chipInformation[100]; // Chip information buffer
 
 // Web server
 WebServer webServer(80);
-char webStringBuffer[12 * 1024];
+char webStringBuffer[16 * 1024];
 
 // MQTT
-//WiFiClient espClient;
-WiFiClientSecure espClient; // Use WiFiClientSecure for SSL/TLS MQTT connections
+//WiFiClient espClient;     // For non-TLS connections
+WiFiClientSecure espClient; // Use WiFiClientSecure for TLS MQTT connections
 PubSubClient mqttClient(espClient);
 unsigned long mqttLastConnectionAttempt = 0;
 
@@ -64,14 +63,38 @@ int lightSensorIntegrationTime = VEML7700_IT_100MS; // Current integration time 
 float lightSensorPeakLevels[MEASUREMENT_WINDOW]; // Track max light levels for each second
 int lightSensorLastTimeIndex = 0; // Last time index into lightSensorPeakLevels[] for tracking peak light levels during each second
 
-// BME280
-Adafruit_BME280 bme280;
+// BME680
+Bsec2 bme680;
 SemaphoreHandle_t xMutexEnvironmental; // Mutex to protect shared variables between tasks
-bool  environmentSensorOK;    // True if the sensor data is OK, false if not
-float environmentTemperature; // Always in C and converted to F on output if BME280_TEMP_F is true
-float environmentDewPoint;    // Always in C and converted to F on output if BME280_TEMP_F is true
+bool environmentSensorReady;  // True if the sensor is stabilized and reporting non-default values
+float environmentTemperature; // Always in C and converted to F on output if BME680_TEMP_F is true
+float environmentDewPoint;    // Always in C and converted to F on output if BME680_TEMP_F is true
 float environmentHumidity;
 float environmentPressure;
+float environmentIAQ;         // 0 - 500 representing "clean" to "extremely polluted"
+int   environmentIAQAccuracy; // 0 = unreliable, 1 = low, 2 = medium, 3 = high accuracy
+float environmentCO2;
+float environmentVOC;
+float environmentGasResistance;
+float environmentGasPercentage;
+char environmentLibraryInformation[20]; // BSEC version information buffer
+bsecSensor environmentSensorList[] = {
+  // Desired subscription list of BSEC outputs
+  BSEC_OUTPUT_IAQ,
+  //BSEC_OUTPUT_RAW_TEMPERATURE,
+  BSEC_OUTPUT_RAW_PRESSURE,
+  //BSEC_OUTPUT_RAW_HUMIDITY,
+  BSEC_OUTPUT_RAW_GAS,
+  BSEC_OUTPUT_STABILIZATION_STATUS,
+  //BSEC_OUTPUT_RUN_IN_STATUS,
+  BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
+  BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
+  //BSEC_OUTPUT_STATIC_IAQ,
+  BSEC_OUTPUT_CO2_EQUIVALENT,
+  BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,
+  BSEC_OUTPUT_GAS_PERCENTAGE
+  //BSEC_OUTPUT_COMPENSATED_GAS
+};
 
 // Uptime calculations
 SemaphoreHandle_t xMutexUptime; // Mutex to protect shared variables between tasks
@@ -87,6 +110,10 @@ float batteryPercent;
 int acPowerState; // Is set to 1 when 5V is present on the USB bus (AC power is on), and 0 when not (AC power is off)
 
 // Historical data streams for the web page charts
+#define DATA_ELEMENT_SIZE   10    // Size of one data value as numeric text, with comma delimiter
+#define DATA_STREAM_COUNT   9     // There are nine data streams: sound, light, temperature, humidity, pressure, IAQ, CO2, VOC, time
+#define DATA_STREAM_SIZE    DATA_HISTORY_COUNT * DATA_ELEMENT_SIZE // Size of a single data stream in bytes
+#define DATA_SET_SIZE       DATA_STREAM_SIZE * DATA_STREAM_COUNT   // Size of the entire data set in bytes
 unsigned char* psramDataSet;
 
 // Main loop
@@ -156,22 +183,25 @@ inline int buffercat(char* dest, const char* source)
   return strlen(source);
 }
 
-// Web server 404 handler
-void webHandler404()
+// Web helper function to describe IAQ accuracy values
+inline char* webFormatIAQAccuracy(int a)
 {
-  webServer.send(404, "text/plain", "Not found");
+  switch (a)
+  {
+    case 0:  return "Unreliable";
+    case 1:  return "Low";
+    case 2:  return "Medium";
+    default: return "High";
+  }
 }
 
-// Web server "/" GET handler (for root/home page)
-void webHandlerRoot()
+// Web helper function to render the main data table (the "dashboard") at the specified buffer position
+char* webRenderDashboard(char* buffer)
 {
   IPAddress ip = WiFi.localIP();
   struct tm timeInfo; // NTP
 
-  // Build the HTML response in the web string buffer
-  char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
-  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME, esp_timer_get_time() / 1000000, BME280_TEMP_F ? "F" : "C")); // Hostname gets added to the HTML <title> inside the template header, and the ESP32 current seconds counter and temperature units are used by JavaScript for the charts
-  buffer += buffercat(buffer, "<table class=\"sensor\" cellspacing=\"0\" cellpadding=\"3\">"); // Sensor data table
+  buffer += buffercat(buffer, "<table id=\"dashboard\" class=\"sensor\" cellspacing=\"0\" cellpadding=\"3\">"); // Sensor data table
   buffer += bytesAdded(sprintf(buffer, "<tr><th colspan=\"2\" class=\"header\">%s</th></tr>", WIFI_HOSTNAME)); // Network hostname
 
   xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
@@ -189,16 +219,30 @@ void webHandlerRoot()
   xSemaphoreGive(xMutexLightSensor); // Done with light data
 
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Sensor OK?</th><td>%s</td></tr>", environmentSensorOK ? "1 (Yes)" : "0 (No)")); // Environment sensor OK?
-  #if defined(BME280_TEMP_F)
-    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Temperature</th><td>%0.1f&deg; F</td></tr>", environmentTemperature * 9.0F / 5.0F + 32.0F)); // Environment temperature
-    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Dew Point</th><td>%0.1f&deg; F</td></tr>", environmentDewPoint * 9.0F / 5.0F + 32.0F)); // Environment dew point
-  #else
-    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Temperature</th><td>%0.1f&deg; C</td></tr>", environmentTemperature)); // Environment temperature
-    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Dew Point</th><td>%0.1f&deg; C</td></tr>", environmentDewPoint)); // Environment dew point
-  #endif
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Humidity</th><td>%0.1f%%</td></tr>", environmentHumidity)); // Environment humidiy
-  buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Barometric Pressure</th><td>%0.1f mbar</td></tr>", environmentPressure)); // Environment barometric pressure
+  if (environmentSensorReady)
+  {
+    #if defined(BME680_TEMP_F)
+      buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Temperature</th><td>%0.1f&deg; F</td></tr>", environmentTemperature * 9.0F / 5.0F + 32.0F)); // Environment temperature
+      buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Dew Point</th><td>%0.1f&deg; F</td></tr>", environmentDewPoint * 9.0F / 5.0F + 32.0F)); // Environment dew point
+    #else
+      buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Temperature</th><td>%0.1f&deg; C</td></tr>", environmentTemperature)); // Environment temperature
+      buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Dew Point</th><td>%0.1f&deg; C</td></tr>", environmentDewPoint)); // Environment dew point
+    #endif
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Humidity</th><td>%0.1f%%</td></tr>", environmentHumidity)); // Environment humidiy
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Barometric Pressure</th><td>%0.1f mbar</td></tr>", environmentPressure)); // Environment barometric pressure
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment IAQ Accuracy</th><td>%d (%s)</td></tr>", environmentIAQAccuracy, webFormatIAQAccuracy(environmentIAQAccuracy))); // Environment Indoor Air Quality accuracy
+    if (environmentIAQAccuracy)
+    {
+      buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment IAQ</th><td>%0.2f</td></tr>",     environmentIAQ)); // Environment Indoor Air Quality (IAQ) estimate
+      buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment CO2</th><td>%0.2f ppm</td></tr>", environmentCO2)); // Environment CO2 equivalent estimate
+      buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment VOC</th><td>%0.2f ppm</td></tr>", environmentVOC)); // Environment Breath VOC Concentration estimate
+    }  
+  }
+  else
+  {
+    //buffer += bytesAdded(sprintf(buffer, "<tr class=\"environmental\"><th>Environment Sensor Stabilized?</th><td>%s</td></tr>", environmentSensorReady ? "1 (Yes)" : "0 (No)")); // Environment sensor stabilized?
+    buffer += buffercat(buffer, "<tr class=\"environmental\"><th>Environment Sensor Stabilized?</th><td>0 (No)</td></tr>"); // Environment sensor stabilized?
+  }
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
@@ -223,10 +267,34 @@ void webHandlerRoot()
   }
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Chip Information</th><td>%s</td></tr>", chipInformation)); // ESP32 chipset information
   buffer += buffercat(buffer, "</table>"); // Sensor data table
+
+  return buffer;
+}
+
+// Web server 404 handler
+void webHandler404()
+{
+  webServer.send(404, "text/plain", "Not found");
+}
+
+// Web server "/" GET handler (for root/home page)
+void webHandlerRoot()
+{
+  // Build the HTML response in the web string buffer
+  char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
+  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME, esp_timer_get_time() / 1000000, BME680_TEMP_F ? "F" : "C")); // Hostname gets added to the HTML <title> inside the template header, and the ESP32 current seconds counter and temperature units are used by JavaScript for the charts
+  buffer  = webRenderDashboard(buffer);
   buffer += buffercat(buffer, htmlFooter); // HTML template footer
 
   // Send the HTML response to the client
   webServer.send(200, "text/html", webStringBuffer);
+}
+
+// Web server "/dashboard" GET handler (for AJAX updates on the main interface)
+void webHandlerDashboard()
+{
+  webRenderDashboard(webStringBuffer);
+  webServer.send(200, "text/plain", webStringBuffer);
 }
 
 // Web server "/metrics" GET handler (for Prometheus and similar telemetry tools)
@@ -270,9 +338,9 @@ void webHandlerMetrics()
 
   // Environmentals
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
-  if (environmentSensorOK)
+  if (environmentSensorReady)
   {
-    #if defined(BME280_TEMP_F)
+    #if defined(BME680_TEMP_F)
       buffer += buffercat(buffer, "# HELP environmental_temperature Environment temperature (F)\n");
       buffer += buffercat(buffer, "# TYPE environmental_temperature gauge\n");
       buffer += bytesAdded(sprintf(buffer, "environmental_temperature %0.1f\n\n", environmentTemperature * 9.0F / 5.0F + 32.0F));
@@ -283,7 +351,7 @@ void webHandlerMetrics()
       buffer += buffercat(buffer, "# HELP environmental_temperature Environment temperature (C)\n");
       buffer += buffercat(buffer, "# TYPE environmental_temperature gauge\n");
       buffer += bytesAdded(sprintf(buffer, "environmental_temperature %0.1f\n\n", environmentTemperature));
-      buffer += buffercat(buffer, "# HELP environmental_dew_point Environment dew point (F)\n");
+      buffer += buffercat(buffer, "# HELP environmental_dew_point Environment calculated dew point (C)\n");
       buffer += buffercat(buffer, "# TYPE environmental_dew_point gauge\n");
       buffer += bytesAdded(sprintf(buffer, "environmental_dew_point %0.1f\n\n", environmentDewPoint));
     #endif
@@ -293,6 +361,23 @@ void webHandlerMetrics()
     buffer += buffercat(buffer, "# HELP environmental_pressure_mbar Environment barometric pressure\n");
     buffer += buffercat(buffer, "# TYPE environmental_pressure_mbar gauge\n");
     buffer += bytesAdded(sprintf(buffer, "environmental_pressure_mbar %0.1f\n\n", environmentPressure));
+
+    // IAQ metrics
+    buffer += buffercat(buffer, "# HELP environmental_iaq_accuracy Environment IAQ accuracy (0=unreliable, 1=low, 2=medium, 3=high)\n");
+    buffer += buffercat(buffer, "# TYPE environmental_iaq_accuracy gauge\n");
+    buffer += bytesAdded(sprintf(buffer, "environmental_iaq_accuracy %d\n\n", environmentIAQAccuracy));
+    if (environmentIAQAccuracy)
+    {
+      buffer += buffercat(buffer, "# HELP environmental_iaq Environment IAQ (0=clean, 50=good, 200=polluted, 500=extremely polluted)\n");
+      buffer += buffercat(buffer, "# TYPE environmental_iaq gauge\n");
+      buffer += bytesAdded(sprintf(buffer, "environmental_iaq %0.2f\n\n", environmentIAQ));
+      buffer += buffercat(buffer, "# HELP environmental_co2_ppm Environment calculated CO2 equivalent estimate (500=normal)\n");
+      buffer += buffercat(buffer, "# TYPE environmental_co2_ppm gauge\n");
+      buffer += bytesAdded(sprintf(buffer, "environmental_co2_ppm %0.2f\n\n", environmentCO2));
+      buffer += buffercat(buffer, "# HELP environmental_voc_ppm Environment calculated breath-VOC concentration estimate (< 1.0 is good)\n");
+      buffer += buffercat(buffer, "# TYPE environmental_voc_ppm gauge\n");
+      buffer += bytesAdded(sprintf(buffer, "environmental_voc_ppm %0.2f\n\n", environmentVOC));
+    }
   }
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
@@ -350,10 +435,12 @@ void setupWebserver()
 {
   Serial.println("Web: Starting server");
 
-  // Set URI handlers
+  // Set features and URI handlers
+  webServer.enableCORS();
   webServer.on("/", webHandlerRoot);
-  webServer.on("/metrics", webHandlerMetrics);
+  webServer.on("/dashboard", webHandlerDashboard);
   webServer.on("/data", webHandlerData);
+  webServer.on("/metrics", webHandlerMetrics);
   webServer.onNotFound(webHandler404);
 
   // Start the server
@@ -402,72 +489,66 @@ void updateMQTT()
   char mqttStringBuffer[25];
   struct tm timeInfo; // NTP
 
+  // Helper macro to format and publish a single value to MQTT
+  #define MQTT_PUBLISH(topic, format, value) sprintf(mqttStringBuffer, format, value); mqttClient.publish(topic, mqttStringBuffer, true);
+
   // Sound level
   xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data (calculated on a different thread)
-  sprintf(mqttStringBuffer, "%0.2f", soundSensorSpl);
-  mqttClient.publish(MQTT_TOPIC_BASE "sound_level_db", mqttStringBuffer, true);
-  sprintf(mqttStringBuffer, "%0.2f", soundSensorSplAverage);
-  mqttClient.publish(MQTT_TOPIC_BASE "sound_level_db_average", mqttStringBuffer, true);
-  sprintf(mqttStringBuffer, "%0.2f", soundSensorSplPeak);
-  mqttClient.publish(MQTT_TOPIC_BASE "sound_level_db_peak", mqttStringBuffer, true);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "sound_level_db",         "%0.2f", soundSensorSpl);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "sound_level_db_average", "%0.2f", soundSensorSplAverage);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "sound_level_db_peak",    "%0.2f", soundSensorSplPeak);
   xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
 
   // Light level
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data (calculated on a different thread)
-  sprintf(mqttStringBuffer, "%0.2f", lightSensorLux);
-  mqttClient.publish(MQTT_TOPIC_BASE "light_level_lux", mqttStringBuffer, true);
-  sprintf(mqttStringBuffer, "%0.2f", lightSensorLuxAverage);
-  mqttClient.publish(MQTT_TOPIC_BASE "light_level_lux_average", mqttStringBuffer, true);
-  sprintf(mqttStringBuffer, "%0.2f", lightSensorLuxPeak);
-  mqttClient.publish(MQTT_TOPIC_BASE "light_level_lux_peak", mqttStringBuffer, true);
-  sprintf(mqttStringBuffer, "%0.3f", lightSensorGain);
-  mqttClient.publish(MQTT_TOPIC_BASE "light_level_measurement_gain", mqttStringBuffer, true);
-  sprintf(mqttStringBuffer, "%d", lightSensorIntegrationTime);
-  mqttClient.publish(MQTT_TOPIC_BASE "light_level_measurement_integration_time_ms", mqttStringBuffer, true);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_lux",         "%0.2f", lightSensorLux);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_lux_average", "%0.2f", lightSensorLuxAverage);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_lux_peak",    "%0.2f", lightSensorLuxPeak);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_measurement_gain", "%0.3f", lightSensorGain);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_measurement_integration_time_ms", "%d", lightSensorIntegrationTime);
   xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
 
   // Environmentals
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
-  if (environmentSensorOK)
+  if (environmentSensorReady)
   {
-    sprintf(mqttStringBuffer, "%0.1f", environmentTemperature); // Regardless of F or C units, just report the number to MQTT
-    mqttClient.publish(MQTT_TOPIC_BASE "environmental_temperature", mqttStringBuffer, true);
-    sprintf(mqttStringBuffer, "%0.1f", environmentDewPoint); // Regardless of F or C units, just report the number to MQTT
-    mqttClient.publish(MQTT_TOPIC_BASE "environmental_dew_point", mqttStringBuffer, true);
-    sprintf(mqttStringBuffer, "%0.1f", environmentHumidity);
-    mqttClient.publish(MQTT_TOPIC_BASE "environmental_humidity", mqttStringBuffer, true);
-    sprintf(mqttStringBuffer, "%0.1f", environmentPressure);
-    mqttClient.publish(MQTT_TOPIC_BASE "environmental_pressure_mbar", mqttStringBuffer, true);
+    MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_temperature",   "%0.1f", BME680_TEMP_F ? environmentTemperature * 9.0F / 5.0F + 32.0F : environmentTemperature);
+    MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_dew_point",     "%0.1f", BME680_TEMP_F ? environmentDewPoint    * 9.0F / 5.0F + 32.0F : environmentDewPoint);
+    MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_humidity",      "%0.1f", environmentHumidity);
+    MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_pressure_mbar", "%0.1f", environmentPressure);
+
+    // IAQ metrics
+    MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_iaq_accuracy", "%d", environmentIAQAccuracy);
+    if (environmentIAQAccuracy)
+    {
+      MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_iaq",     "%0.2f", environmentIAQ);
+      MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_co2_ppm", "%0.2f", environmentCO2);
+      MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_voc_ppm", "%0.2f", environmentVOC);
+    }
   }
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
   // Measurement window
-  sprintf(mqttStringBuffer, "%d", MEASUREMENT_WINDOW);
-  mqttClient.publish(MQTT_TOPIC_BASE "measurement_window_seconds", mqttStringBuffer, true);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "measurement_window_seconds", "%d", MEASUREMENT_WINDOW);
 
   // Uptime information
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data
-  sprintf(mqttStringBuffer, "%lld", timer);
-  mqttClient.publish(MQTT_TOPIC_BASE "uptime_seconds", mqttStringBuffer, true);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "uptime_seconds", "%lld", timer);
   mqttClient.publish(MQTT_TOPIC_BASE "uptime_detail", uptimeStringBuffer, true);
   xSemaphoreGive(xMutexUptime); // Done with uptime data
 
   // Free heap memory
-  sprintf(mqttStringBuffer, "%d", ESP.getFreeHeap());
-  mqttClient.publish(MQTT_TOPIC_BASE "esp32_free_heap_bytes", mqttStringBuffer, true);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "esp32_free_heap_bytes", "%d", ESP.getFreeHeap());
 
   // Battery data and AC power on/off state
   xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
-  sprintf(mqttStringBuffer, "%0.2f", batteryVoltage);
-  mqttClient.publish(MQTT_TOPIC_BASE "esp32_battery_voltage", mqttStringBuffer, true);
-  sprintf(mqttStringBuffer, "%0.2f", batteryPercent);
-  mqttClient.publish(MQTT_TOPIC_BASE "esp32_battery_percent", mqttStringBuffer, true);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "esp32_battery_voltage", "%0.2f", batteryVoltage);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "esp32_battery_percent", "%0.2f", batteryPercent);
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_ac_power_state", acPowerState ? "1" : "0", true); // 1 for "ON" or 0 for "OFF"
   xSemaphoreGive(xMutexBattery); // Done with battery data
 
   // WiFi signal strength
-  sprintf(mqttStringBuffer, "%d", WiFi.RSSI());
-  mqttClient.publish(MQTT_TOPIC_BASE "esp32_wifi_signal_strength_dbm", mqttStringBuffer, true);
+  MQTT_PUBLISH(MQTT_TOPIC_BASE "esp32_wifi_signal_strength_dbm", "%d", WiFi.RSSI());
 
   // NTP system time
   if (getLocalTime(&timeInfo))
@@ -475,6 +556,9 @@ void updateMQTT()
     sprintf(mqttStringBuffer, "%02d/%02d/%d %02d:%02d:%02d", timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_year + 1900, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
     mqttClient.publish(MQTT_TOPIC_BASE "esp32_system_time", mqttStringBuffer, true);
   }
+
+  // BME680 library information
+  mqttClient.publish(MQTT_TOPIC_BASE "esp32_bsec_library_version", environmentLibraryInformation, true);
 
   // Chip information
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_chip_information", chipInformation, true);
@@ -494,7 +578,7 @@ void setupPsram()
       psramDataSet = (unsigned char*)ps_malloc(DATA_SET_SIZE + 1); // +1 to make room for the NULL terminator
       if (psramDataSet)
       {
-        memset(psramDataSet, ' ', DATA_SET_SIZE);
+        memset(psramDataSet, ' ', DATA_SET_SIZE); // Fill with spaces
         psramDataSet[DATA_SET_SIZE] = 0; // NULL terminator
         Serial.print("PSRAM: Allocated "); Serial.print(DATA_SET_SIZE + 1); Serial.println(" bytes");
       }
@@ -554,9 +638,12 @@ void updateDataSet()
     addDataElement(2, environmentTemperature); // Always in Celsius
     addDataElement(3, environmentHumidity);
     addDataElement(4, environmentPressure);
+    addDataElement(5, environmentIAQ);
+    addDataElement(6, environmentCO2);
+    addDataElement(7, environmentVOC);
     xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
-    addDataElement(5, timer); // Time index
+    addDataElement(8, timer); // Time index
   }
 }
 
@@ -574,50 +661,50 @@ void setupTFT()
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
   display.init(TFT_SCREEN_HEIGHT, TFT_SCREEN_WIDTH);
-  display.setRotation(TFT_ROTATION);
 
   // Clear the display
   display.fillScreen(ST77XX_BLACK);
 
   // Establish defaults
-  display.setRotation(3);
+  canvas.setRotation(TFT_ROTATION);
   canvas.setFont(&FreeSans9pt7b);
   canvas.setTextColor(ST77XX_WHITE); // White text
 }
 
 // Helper function to format the wide range of possible lux values into a consistent 4-digit representation with variable decimal places
-char formatLuxBuffer[10];
-void formatLux(float lux)
+void formatLux(char* buffer, float lux)
 {
   if (lux < 10)
   {
-    sprintf(formatLuxBuffer, "%0.3f", lux);
+    sprintf(buffer, "%0.3f", lux);
   }
   else if (lux < 100)
   {
-    sprintf(formatLuxBuffer, "%.2f", lux);
+    sprintf(buffer, "%.2f", lux);
   }
   else if (lux < 1000)
   {
-    sprintf(formatLuxBuffer, "%.1f", lux);
+    sprintf(buffer, "%.1f", lux);
   }
   else if (lux < 10000)
   {
-    sprintf(formatLuxBuffer, "%.0f", lux);
+    sprintf(buffer, "%.0f", lux);
   }
   else if (lux < 100000)
   {
-    sprintf(formatLuxBuffer, "%0.2fK", lux/1000); // Such as "28.00K"
+    sprintf(buffer, "%0.2fK", lux/1000); // Such as "28.00K"
   }
   else
   {
-    sprintf(formatLuxBuffer, "%0.1fK", lux/1000); // Such as "102.0K"
+    sprintf(buffer, "%0.1fK", lux/1000); // Such as "102.0K"
   }
 }
 
 // Update the TFT display
 void updateDisplay()
 {
+  char formatLuxBuffer[10];
+
   canvas.fillScreen(ST77XX_BLACK);
   canvas.setFont(&FreeSans9pt7b);
   canvas.setCursor(0, 20);
@@ -631,15 +718,15 @@ void updateDisplay()
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
   canvas.setTextColor(ST77XX_YELLOW);
   //canvas.printf("%0.2f  %0.2f  %0.2f lux", lightSensorLux, lightSensorLuxAverage, lightSensorLuxPeak);
-  formatLux(lightSensorLux);        canvas.print(formatLuxBuffer); canvas.print("  ");
-  formatLux(lightSensorLuxAverage); canvas.print(formatLuxBuffer); canvas.print("  ");
-  formatLux(lightSensorLuxPeak);    canvas.print(formatLuxBuffer); canvas.print(" lux");
+  formatLux(formatLuxBuffer, lightSensorLux);        canvas.print(formatLuxBuffer); canvas.print("  ");
+  formatLux(formatLuxBuffer, lightSensorLuxAverage); canvas.print(formatLuxBuffer); canvas.print("  ");
+  formatLux(formatLuxBuffer, lightSensorLuxPeak);    canvas.print(formatLuxBuffer); canvas.print(" lux");
   canvas.println();
   xSemaphoreGive(xMutexLightSensor); // Done with light data
 
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   canvas.setTextColor(ST77XX_GREEN);
-  #if defined(BME280_TEMP_F)
+  #if defined(BME680_TEMP_F)
     canvas.printf("%0.1fF   %0.1f%%   %0.0f mbar", environmentTemperature * 9.0F / 5.0F + 32.0F, environmentHumidity, environmentPressure);
   #else
     canvas.printf("%0.1fC   %0.1f%%   %0.0f mbar", environmentTemperature, environmentHumidity, environmentPressure);
@@ -671,52 +758,123 @@ void updateDisplay()
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// BME280 Environmental Sensor
+// BME680 Environmental Sensor
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Setup the BME280 sensor
-void setupEnvironmentalSensor()
+// Report any BME680 errors to the console
+void logEnvironmentSensorErrors()
 {
-  Serial.println("Environmentals: Initializing BME280");
-  if (!bme280.begin(BME280_ADDRESS))
+  if (bme680.status < BSEC_OK)
   {
-    Serial.println("Environmentals: BME280 configuration failed");
+      Serial.print("Environmentals: BSEC error code "); Serial.println(bme680.status);
+  }
+  else if (bme680.status > BSEC_OK)
+  {
+      Serial.print("Environmentals: BSEC warning code "); Serial.println(bme680.status);
+  }
+  if (bme680.sensor.status < BME68X_OK)
+  {
+      Serial.print("Environmentals: BME68X error code "); Serial.println(bme680.sensor.status);
+  }
+  else if (bme680.sensor.status > BME68X_OK)
+  {
+      Serial.print("Environmentals: BME68X warning code "); Serial.println(bme680.sensor.status);
   }
 }
 
-// Environmental data measurement using the BME280 sensor
-void measureEnvironmentals()
+// Setup the BME680 sensor
+void setupEnvironmentalSensor()
 {
-  float t, h, p;
-
-  // Read the environmental data
-  #if defined(BME280_TEMP_F)
-    t = bme280.readTemperature() + BME280_TEMP_ADJUSTMENT * 5.0F / 9.0F; // BME280_TEMP_ADJUSTMENT needs to be converted to C here (just a ratio, not an actual temperature, so subtracting 32F isn't necessary)
-  #else
-    t = bme280.readTemperature() + BME280_TEMP_ADJUSTMENT;
-  #endif
-  h = bme280.readHumidity();
-  p = bme280.readPressure() / 100.0F;
-
-  // Is there any trouble with the sensor data?
-  if (!(t < -50 || t > 200 || h < 0 || h > 100 || p < 700 || p > 1300))
+  Serial.println("Environmentals: Initializing BME680");
+  
+  // Initialize
+  Wire.begin(); // Required for bme680.begin()
+  if (!bme680.begin(BME680_ADDRESS, Wire))
   {
-    if (isnanf(t) || isnanf(h) || isnanf(p))
+    logEnvironmentSensorErrors();
+  }
+
+  // Temperature correction
+  bme680.setTemperatureOffset(BME680_TEMP_OFFSET);
+
+  // Subscribe to the desired BSEC outputs
+  if (!bme680.updateSubscription(environmentSensorList, ARRAY_LEN(environmentSensorList), BSEC_SAMPLE_RATE_CONT)) // Continuous sampling, about every second
+  {
+    logEnvironmentSensorErrors();
+  }
+
+  // The callback function will be responsible for receving BSEC data at the specified sample rate
+  bme680.attachCallback(measureEnvironmentals);
+
+  // BSEC library information
+  sprintf(environmentLibraryInformation, "%d.%d.%d.%d", bme680.version.major, bme680.version.minor, bme680.version.major_bugfix, bme680.version.minor_bugfix);
+}
+
+// Environmental data measurement callback for the BME680 BSEC library
+void measureEnvironmentals(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec)
+{
+  float t, h, p, iaq, gasRaw, gasPercent, co2, voc;
+  int iaqAccuracy, stabilized;
+
+  if (outputs.nOutputs == ARRAY_LEN(environmentSensorList))
+  {
+    // Read all outputs
+    for (int i = 0; i < outputs.nOutputs; i++)
     {
-      // Reset the BME280
-      Serial.println("Environmentals: NaN detected - Resetting BME280");
-      setupEnvironmentalSensor();
-      xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
-      environmentSensorOK = false;
-      xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
-    }
-    else
-    {
-      // Update the environmental values
-      xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
-      if (environmentTemperature == 0 && environmentHumidity == 0 && environmentPressure == 0)
+      const bsecData output  = outputs.output[i];
+      switch (output.sensor_id)
       {
-        // Initialize values
+          case BSEC_OUTPUT_IAQ:
+              iaq = output.signal; // 0 - 500 representing "clean" to "extremely polluted"
+              iaqAccuracy = (int)output.accuracy; // 0 = unreliable, 1 = low, 2 = medium, 3 = high accuracy
+              break;
+          //case BSEC_OUTPUT_RAW_TEMPERATURE:
+          //    break;
+          case BSEC_OUTPUT_RAW_PRESSURE:
+              p = output.signal; // mbar
+              break;
+          //case BSEC_OUTPUT_RAW_HUMIDITY:
+          //    break;
+          case BSEC_OUTPUT_RAW_GAS:
+              gasRaw = output.signal; // Ohms
+              break;
+          case BSEC_OUTPUT_STABILIZATION_STATUS:
+              stabilized = (int)output.signal; // 0 = ongoing stabilization, 1 = stabilized
+              break;
+          //case BSEC_OUTPUT_RUN_IN_STATUS:
+          //    break;
+          case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE:
+              t = output.signal; // Celsius
+              break;
+          case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY:
+              h = output.signal; // RH%
+              break;
+          //case BSEC_OUTPUT_STATIC_IAQ:
+          //    break;
+          case BSEC_OUTPUT_CO2_EQUIVALENT:
+              co2 = output.signal; // ppm
+              break;
+          case BSEC_OUTPUT_BREATH_VOC_EQUIVALENT:
+              voc = output.signal; // ppm
+              break;
+          case BSEC_OUTPUT_GAS_PERCENTAGE:
+              gasPercent = output.signal; // Percentage of min and max filtered gas value
+              break;
+          //case BSEC_OUTPUT_COMPENSATED_GAS:
+          //    break;
+          //default:
+          //    break;
+      }
+    }
+
+    // If the sensor is stabilized then copy its readings into the global variables
+    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
+    if (stabilized)
+    {
+      environmentSensorReady = true;
+      if (environmentPressure == 0)
+      {
+        // Initialize
         environmentTemperature = t;
         environmentHumidity = h;
         environmentPressure = p;
@@ -725,26 +883,41 @@ void measureEnvironmentals()
       {
         // Smooth values with an EMA moving average
         environmentTemperature = (environmentTemperature * (MEASUREMENT_WINDOW - 1) + t) / MEASUREMENT_WINDOW;
-        environmentHumidity = (environmentHumidity * (MEASUREMENT_WINDOW - 1) + h) / MEASUREMENT_WINDOW;
-        environmentPressure = (environmentPressure * (MEASUREMENT_WINDOW - 1) + p) / MEASUREMENT_WINDOW;
+        environmentHumidity    = (environmentHumidity    * (MEASUREMENT_WINDOW - 1) + h) / MEASUREMENT_WINDOW;
+        environmentPressure    = (environmentPressure    * (MEASUREMENT_WINDOW - 1) + p) / MEASUREMENT_WINDOW;
+      }
+      environmentIAQAccuracy = iaqAccuracy; // This should not be smoothed
+      if (iaqAccuracy > 0 && iaq != 50.0F)
+      {
+        if (environmentGasResistance == 0)
+        {
+          // Initialize
+          environmentIAQ = iaq;
+          environmentCO2 = co2;
+          environmentVOC = voc;
+          environmentGasResistance = gasRaw;
+          environmentGasPercentage = gasPercent;
+        }
+        else
+        {
+          // Smooth values with an EMA moving average
+          environmentIAQ = (environmentIAQ * (MEASUREMENT_WINDOW - 1) + iaq) / MEASUREMENT_WINDOW;
+          environmentCO2 = (environmentCO2 * (MEASUREMENT_WINDOW - 1) + co2) / MEASUREMENT_WINDOW;
+          environmentVOC = (environmentVOC * (MEASUREMENT_WINDOW - 1) + voc) / MEASUREMENT_WINDOW;
+          environmentGasResistance = (environmentGasResistance * (MEASUREMENT_WINDOW - 1) + gasRaw) / MEASUREMENT_WINDOW;
+          environmentGasPercentage = (environmentGasPercentage * (MEASUREMENT_WINDOW - 1) + gasPercent) / MEASUREMENT_WINDOW;
+        }
       }
 
       // Dew point calculation using the Magnus formula. Reference: https://en.wikipedia.org/wiki/Dew_point#Calculating_the_dew_point
-      // NOTE: This is effectively "smoothed" due to reliance on the EMA-smoothed temperature and humidity values
+      // NOTE: This is effectively "smoothed" due to reliance on the smoothed temperature and humidity values
       float magnusGammaTRH = (float)log(environmentHumidity / 100.0F) + 17.625F * environmentTemperature / (243.04F + environmentTemperature);
-      environmentDewPoint = 243.04F * magnusGammaTRH / (17.625F - magnusGammaTRH); // Always in C and converted to F on output if BME280_TEMP_F is true
-
-      environmentSensorOK = true;
-      xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+      environmentDewPoint = 243.04F * magnusGammaTRH / (17.625F - magnusGammaTRH); // Always in C and converted to F on output if BME680_TEMP_F is true
     }
-  }
-  else
-  {
-    // Reset the BME280
-    Serial.printf("Environmentals: BME280 data error: t=%0.1f h=%0.1f p=%0.1f", t, h, p); Serial.println();
-    setupEnvironmentalSensor();
-    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
-    environmentSensorOK = false;
+    else
+    {
+      environmentSensorReady = false;
+    }
     xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
   }
 }
@@ -882,7 +1055,7 @@ void measureBattery()
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Read all I2C devices in sequence (background task)
+// Read I2C devices in sequence (background task)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Each device is read in sequence so that a single task can be used to read all I2C data, and so the timing can be well-controlled
@@ -893,18 +1066,14 @@ void readI2CDevices(void *parameter)
   // Infinite loop since this is a separate task from the main thread
   while (true)
   {
-    // Read the I2C devices in sequence
-    timer = millis();
-    measureEnvironmentals(); // Read the BME280 sensor data
-    measureLight(); // Measure the light level
-    measureBattery(); // Read the LiPo battery voltage
-    timer = millis() - timer; // Elapsed time in ms, which seems to be around 711 ms
-
-    // Only read the I2C devices approximately every second, but just SLIGHTLY faster to ensure that light and sound peak tracking gets enough hits
-    if (timer < 950)
+    if (millis() - timer >= 950)
     {
-      delay(950 - timer); // Non-blocking delay on ESP32, in milliseconds
+      // Only read these I2C devices approximately every second, but just SLIGHTLY faster to ensure that light level peak tracking gets enough hits
+      measureLight();   // Measure the light level
+      measureBattery(); // Read the LiPo battery voltage
+      timer = millis(); // Reset the timeout
     }
+    delay(20); // Non-blocking delay on ESP32, in milliseconds
   }
 }
 
@@ -1112,10 +1281,17 @@ void setup()
 void loop()
 {
   // MQTT connection management
-  //if (!mqttClient.connected()) connectMQTT(); else mqttClient.loop();
+  if (!mqttClient.connected()) connectMQTT(); else mqttClient.loop();
 
   // Web server request management
   webServer.handleClient();
+
+  // Read the BME680 data (does not work as a background task so it needs to be on the main thread)
+  bme680.run();
+  if (bme680.status < BSEC_OK || bme680.sensor.status < BME68X_OK)
+  {
+    logEnvironmentSensorErrors();
+  }
 
   // Uptime calculations: How long has the ESP32 been running since it was booted up?
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data
@@ -1177,5 +1353,5 @@ void loop()
   }
 
   // Yield to other tasks, and slow down the main loop a little
-  delay(40); // Non-blocking delay on ESP32, in milliseconds
+  delay(20); // Non-blocking delay on ESP32, in milliseconds
 }

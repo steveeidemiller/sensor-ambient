@@ -28,10 +28,10 @@ IPAddress webAllowedClients[] = {
 #define TFT_TIMEOUT       30    // After a button press, the display will be powered on for this many seconds before auto-shutoff
 #define TFT_ROTATION      0     // 0 = 0, 1 = 90, 2 = 180, 3 = 270. Reference: https://learn.adafruit.com/adafruit-gfx-graphics-library/rotating-the-display
 
-// BME280 configuration
-#define BME280_ADDRESS 0x77
-#define BME280_TEMP_F true           // Set to false for Celsius
-#define BME280_TEMP_ADJUSTMENT -2.25 // Degree adjustment to add to raw temperature readings to compensate for sensor heating (Assumed to be in degrees F if BME280_TEMP_F=true, or in degrees C if BME280_TEMP_F=false)
+// BME680 configuration
+#define BME680_ADDRESS 0x77
+#define BME680_TEMP_F true       // Set to false for Celsius
+#define BME680_TEMP_OFFSET 5.0F  // Temperature offset for BSEC2 library, in Celsius. Adjust until temperature readings stabilize and match a known reference.
 
 // SPH0645 I2S sound sensor configuration
 #define I2S_PORT_NUM        I2S_NUM_0         // Use I2S port number 0
@@ -50,7 +50,7 @@ IPAddress webAllowedClients[] = {
 #define AC_POWER_PIN 10 // Attached to the center of the 5V/3.3V resister divider such that the pin gets 3.3V when 5V power exists on the USB bus
 
 // General measurement configuration
-#define MEASUREMENT_WINDOW 60 // Measurements will be averaged with an EMA over this period. It should be similar to the expected Prometheus scrape interval, in seconds.
+#define MEASUREMENT_WINDOW 60 // Measurements will be averaged with an EMA over this period. It should be similar in scale to the expected Prometheus scrape interval, in seconds.
 
 // Max update delays. Outputs will be refreshed at least this often.
 #define UPDATE_INTERVAL_MQTT    60
@@ -59,10 +59,6 @@ IPAddress webAllowedClients[] = {
 
 // PSRAM data storage
 #define DATA_HISTORY_COUNT  2016  // Number of data elements to keep per stream, with one element per UPDATE_INTERVAL_DATA (7 days default = one sample every UPDATE_INTERVAL_DATA seconds = 12 values per hour X 24 X 7)
-#define DATA_ELEMENT_SIZE   10    // Size of one data value as numeric text, with delimiter
-#define DATA_STREAM_COUNT   6     // There are six data streams: sound, light, temperature, humidity, pressure, time. The buffer is also NULL terminated (the +1).
-#define DATA_STREAM_SIZE    DATA_HISTORY_COUNT * DATA_ELEMENT_SIZE // Size of a single data stream in bytes
-#define DATA_SET_SIZE       DATA_STREAM_SIZE * DATA_STREAM_COUNT   // Size of the entire data set in bytes
 
 // MQTT configuration
 const char* MQTT_SERVER   = "192.168.1.60"; // MQTT server name or IP
