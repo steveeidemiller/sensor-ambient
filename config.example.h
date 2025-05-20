@@ -26,7 +26,7 @@ IPAddress webAllowedClients[] = {
 #define TFT_SCREEN_WIDTH  240
 #define TFT_SCREEN_HEIGHT 135
 #define TFT_TIMEOUT       30    // After a button press, the display will be powered on for this many seconds before auto-shutoff
-#define TFT_ROTATION      0     // 0 = 0, 1 = 90, 2 = 180, 3 = 270. Reference: https://learn.adafruit.com/adafruit-gfx-graphics-library/rotating-the-display
+#define TFT_ROTATION      2     // 0 = 0, 2 = 180. Reference: https://learn.adafruit.com/adafruit-gfx-graphics-library/rotating-the-display
 
 // BME680 configuration
 #define BME680_ADDRESS 0x77

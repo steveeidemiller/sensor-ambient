@@ -661,6 +661,7 @@ void setupTFT()
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
   display.init(TFT_SCREEN_HEIGHT, TFT_SCREEN_WIDTH);
+  display.setRotation(3);
 
   // Clear the display
   display.fillScreen(ST77XX_BLACK);
@@ -703,7 +704,8 @@ void formatLux(char* buffer, float lux)
 // Update the TFT display
 void updateDisplay()
 {
-  char formatLuxBuffer[10];
+  char formatBuffer[40];
+  int64_t seconds = esp_timer_get_time() / 1000000; // Current system clock in seconds, used to flip/flop display data
 
   canvas.fillScreen(ST77XX_BLACK);
   canvas.setFont(&FreeSans9pt7b);
@@ -717,34 +719,48 @@ void updateDisplay()
 
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
   canvas.setTextColor(ST77XX_YELLOW);
-  //canvas.printf("%0.2f  %0.2f  %0.2f lux", lightSensorLux, lightSensorLuxAverage, lightSensorLuxPeak);
-  formatLux(formatLuxBuffer, lightSensorLux);        canvas.print(formatLuxBuffer); canvas.print("  ");
-  formatLux(formatLuxBuffer, lightSensorLuxAverage); canvas.print(formatLuxBuffer); canvas.print("  ");
-  formatLux(formatLuxBuffer, lightSensorLuxPeak);    canvas.print(formatLuxBuffer); canvas.print(" lux");
+  formatLux(formatBuffer, lightSensorLux);        canvas.print(formatBuffer); canvas.print("  ");
+  formatLux(formatBuffer, lightSensorLuxAverage); canvas.print(formatBuffer); canvas.print("  ");
+  formatLux(formatBuffer, lightSensorLuxPeak);    canvas.print(formatBuffer); canvas.print(" lux");
   canvas.println();
   xSemaphoreGive(xMutexLightSensor); // Done with light data
 
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   canvas.setTextColor(ST77XX_GREEN);
-  #if defined(BME680_TEMP_F)
-    canvas.printf("%0.1fF   %0.1f%%   %0.0f mbar", environmentTemperature * 9.0F / 5.0F + 32.0F, environmentHumidity, environmentPressure);
-  #else
-    canvas.printf("%0.1fC   %0.1f%%   %0.0f mbar", environmentTemperature, environmentHumidity, environmentPressure);
-  #endif
+  if (seconds % 2)
+  {
+    canvas.printf("IAQ %0.1f VOC %0.1f ppm", environmentIAQ, environmentVOC);
+  }
+  else
+  {
+    #if defined(BME680_TEMP_F)
+      canvas.printf("%0.1fF   %0.1f%%   %0.0f mbar", environmentTemperature * 9.0F / 5.0F + 32.0F, environmentHumidity, environmentPressure);
+    #else
+      canvas.printf("%0.1fC   %0.1f%%   %0.0f mbar", environmentTemperature, environmentHumidity, environmentPressure);
+    #endif
+  }
   canvas.println();
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
 
-  xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
   canvas.setTextColor(ST77XX_MAGENTA);
-  canvas.printf("Battery: %0.2fV / %0.0f%%", batteryVoltage, batteryPercent);
-  canvas.println();
-  xSemaphoreGive(xMutexBattery); // Done with battery data
-
-  xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
-  canvas.setTextColor(ST77XX_CYAN);
-  if (uptimeSeconds % 2)
+  if (seconds % 2)
   {
+    xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
+    canvas.printf("Battery: %0.2fV / %0.0f%%", batteryVoltage, batteryPercent);
+    xSemaphoreGive(xMutexBattery); // Done with battery data
+  }
+  else
+  {
+    xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data (calculated on a different thread)
     canvas.printf("Uptime: %s", uptimeStringBuffer);
+    xSemaphoreGive(xMutexUptime); // Done with uptime data
+  }
+  canvas.println();
+
+  canvas.setTextColor(ST77XX_CYAN);
+  if (seconds % 2)
+  {
+    canvas.printf("WiFi Signal: %d dBm", WiFi.RSSI());
   }
   else
   {
@@ -752,7 +768,6 @@ void updateDisplay()
     canvas.printf("IP Address: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
   }
   //canvas.println();
-  xSemaphoreGive(xMutexUptime); // Done with uptime data
 
   display.drawRGBBitmap(0, 0, canvas.getBuffer(), TFT_SCREEN_WIDTH, TFT_SCREEN_HEIGHT);
 }
@@ -1291,6 +1306,8 @@ void loop()
   if (bme680.status < BSEC_OK || bme680.sensor.status < BME68X_OK)
   {
     logEnvironmentSensorErrors();
+    setupEnvironmentalSensor(); // Reset the BME680
+    delay(50); // Non-blocking delay on ESP32, in milliseconds
   }
 
   // Uptime calculations: How long has the ESP32 been running since it was booted up?
@@ -1315,30 +1332,25 @@ void loop()
 
   // Update outputs every specified update interval, and the first-time through the loop
   bool updateTft  = timer - lastUpdateTimeTft  >= UPDATE_INTERVAL_TFT; // The display can be updated more frequently than MQTT
-  bool updateMqtt = timer - lastUpdateTimeMqtt >= UPDATE_INTERVAL_MQTT;
-  bool updateData = timer - lastUpdateTimeData >= UPDATE_INTERVAL_DATA;
-  if (updateTft || updateMqtt || updateData || lastUpdateTimeTft == 0 || lastUpdateTimeMqtt == 0 || updateData == 0)
+  if (updateTft || lastUpdateTimeTft == 0)
   {
-    // Update the display
-    if (updateTft)
-    {
-      lastUpdateTimeTft = timer;
+      // Update the display
       updateDisplay();
-    }
-
-    // Update MQTT
-    if (updateMqtt)
-    {
-      lastUpdateTimeMqtt = timer;
+      lastUpdateTimeTft = timer;
+  }
+  bool updateMqtt = timer - lastUpdateTimeMqtt >= UPDATE_INTERVAL_MQTT;
+  if (updateMqtt || lastUpdateTimeMqtt == 0)
+  {
+      // Update MQTT
       updateMQTT();
-    }
-
-    // Update the data set
-    if (updateData)
-    {
-      lastUpdateTimeData = timer;
+      lastUpdateTimeMqtt = timer;
+  }
+  bool updateData = timer - lastUpdateTimeData >= UPDATE_INTERVAL_DATA;
+  if (updateData)
+  {
+      // Update the data set
       updateDataSet();
-    }
+      lastUpdateTimeData = timer;
   }
 
   // Turn on the TFT display backlight for a few seconds when a button is pressed. The display is constantly updated, so buttons just turn the backlight on/off.
