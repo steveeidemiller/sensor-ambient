@@ -14,6 +14,9 @@ This ESP32-S3 project is designed to monitor ambient sound, light, and environme
 - AC power on/off sensing to detect power outages at the sensor location
 - LiPo battery backup support to power the sensor through moderate power outages
 
+## Screenshots
+TODO
+
 ## Bill of Materials
 This solution is based on the ESP32-S3 Reverse TFT Feather from Adafruit. The device integrates a TFT display, a LiPo battery power and charging cicuit, and Stemma QT connectors.
 - ESP32-S3 Reverse TFT Feather: [Adafruit #5691](https://www.adafruit.com/product/5691)
@@ -25,7 +28,7 @@ This solution is based on the ESP32-S3 Reverse TFT Feather from Adafruit. The de
 - Two 1% precision metal film resistors for AC power sensing: 22k and 12k
 
 ## Implementation Overview
-- 3D print the included device mount if desired
+- 3D print the included mount if desired
 - Assemble the circuit and mount it on the 3D printed base
 - Clone this repository
     ```bash
@@ -35,5 +38,21 @@ This solution is based on the ESP32-S3 Reverse TFT Feather from Adafruit. The de
 - Using the Arduino IDE, upload the main sketch and configuration to the ESP32-S3 Feather: [Flashing instructions may be a little different from other ESP32 devices](https://learn.adafruit.com/esp32-s3-reverse-tft-feather/using-with-arduino-ide)
 - Verify sensor function by using the HTTP status page
 
-## License
+## Wiring
+TODO
+
+## Configuration Notes
+TODO
+
+## Software Installation
+### Library Dependencies
+### Uploading
+TODO
+
+## 3D Printed Mount
+
+## About the Sensors
+TODO
+
+# License
 This project is licensed under the [MIT License](LICENSE).

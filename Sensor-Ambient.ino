@@ -26,7 +26,8 @@
 #include <config.h>               // The configuration references objects in the above libraries, so include it after those
 
 // ESP32
-char chipInformation[100]; // Chip information buffer
+char chipInformation[100];   // Chip information buffer
+SemaphoreHandle_t xMutexI2C; // Mutex to streamline access to I2C devices
 
 // Web server
 WebServer webServer(80);
@@ -86,7 +87,7 @@ bsecSensor environmentSensorList[] = {
   //BSEC_OUTPUT_RAW_HUMIDITY,
   BSEC_OUTPUT_RAW_GAS,
   BSEC_OUTPUT_STABILIZATION_STATUS,
-  //BSEC_OUTPUT_RUN_IN_STATUS,
+  BSEC_OUTPUT_RUN_IN_STATUS,
   BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
   BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
   //BSEC_OUTPUT_STATIC_IAQ,
@@ -117,10 +118,16 @@ int acPowerState; // Is set to 1 when 5V is present on the USB bus (AC power is 
 unsigned char* psramDataSet;
 
 // Main loop
-uint64_t lastUpdateTimeMqtt = 0; // Time of last MQTT update
-uint64_t lastUpdateTimeTft = 0; // Time of last OLED update
-uint64_t lastUpdateTimeData = 0; // Time of last data set update
 uint64_t timer = 0; // Copy of the main uptime timer that doesn't need a semaphore
+uint64_t lastUpdateTimeMqtt = 0; // Time of last MQTT update
+uint64_t lastUpdateTimeTft  = 0; // Time of last OLED update
+uint64_t lastUpdateTimeData = 0; // Time of last data set update
+
+// Helper function to return the current "clock", which is seconds of uptime
+inline int64_t systemSeconds()
+{
+  return esp_timer_get_time() / 1000000;
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Networking
@@ -249,6 +256,10 @@ char* webRenderDashboard(char* buffer)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Measurement Window for Average/Peak Calculations</th><td>%d seconds</td></tr>", MEASUREMENT_WINDOW)); // Formatted uptime
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime</th><td>%lld seconds</td></tr>", uptimeSecondsTotal)); // Raw uptime in seconds
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>Uptime Detail</th><td>%s</td></tr>", uptimeStringBuffer)); // Formatted uptime
+  if (getLocalTime(&timeInfo))
+  {
+    buffer += bytesAdded(sprintf(buffer, "<tr class=\"system\"><th>System Time</th><td>%02d/%02d/%02d %02d:%02d:%02d</td></tr>", timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_year + 1900, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec));
+  }
   xSemaphoreGive(xMutexUptime); // Done with uptime data
 
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Free Heap Memory</th><td>%d bytes</td></tr>", ESP.getFreeHeap())); // ESP32 free heap memory, which indicates if the program still has enough memory to run effectively
@@ -261,10 +272,7 @@ char* webRenderDashboard(char* buffer)
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>MQTT Server</th><td>%s mqtts://%s:%d</td></tr>", mqttClient.connected() ? "Connected to" : "Disconnected from ", MQTT_SERVER, MQTT_PORT)); // MQTT connection
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>IP Address</th><td>%d.%d.%d.%d</td></tr>", ip[0], ip[1], ip[2], ip[3])); // Network address
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>WiFi Signal Strength (%s)</th><td>%d dBm</td></tr>", WIFI_SSID, WiFi.RSSI())); // Network address
-  if (getLocalTime(&timeInfo))
-  {
-    buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>System Time</th><td>%02d/%02d/%02d %02d:%02d:%02d</td></tr>", timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_year + 1900, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec));
-  }
+  buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Bosch BSEC Library Version</th><td>%s</td></tr>", environmentLibraryInformation)); // BME680 BSEC library version
   buffer += bytesAdded(sprintf(buffer, "<tr class=\"chip\"><th>Chip Information</th><td>%s</td></tr>", chipInformation)); // ESP32 chipset information
   buffer += buffercat(buffer, "</table>"); // Sensor data table
 
@@ -282,7 +290,7 @@ void webHandlerRoot()
 {
   // Build the HTML response in the web string buffer
   char* buffer = webStringBuffer; // "buffer" will be used to walk through the "webStringBuffer" work area using pointer arithmetic
-  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME, esp_timer_get_time() / 1000000, BME680_TEMP_F ? "F" : "C")); // Hostname gets added to the HTML <title> inside the template header, and the ESP32 current seconds counter and temperature units are used by JavaScript for the charts
+  buffer += bytesAdded(sprintf(buffer, htmlHeader, WIFI_HOSTNAME, systemSeconds(), BME680_TEMP_F ? "F" : "C")); // Hostname gets added to the HTML <title> inside the template header, and the ESP32 current seconds counter and temperature units are used by JavaScript for the charts
   buffer  = webRenderDashboard(buffer);
   buffer += buffercat(buffer, htmlFooter); // HTML template footer
 
@@ -409,6 +417,11 @@ void webHandlerMetrics()
   buffer += buffercat(buffer, "# TYPE esp32_wifi_signal_strength gauge\n");
   buffer += bytesAdded(sprintf(buffer, "esp32_wifi_signal_strength{SSID=\"%s\"} %d\n\n", WIFI_SSID, WiFi.RSSI()));
 
+  // BSEC library version
+  buffer += buffercat(buffer, "# HELP esp32_bsec_library_version Bosch BSEC library version\n");
+  buffer += buffercat(buffer, "# TYPE esp32_bsec_library_version gauge\n");
+  buffer += bytesAdded(sprintf(buffer, "esp32_bsec_library_version{version=\"%s\"} 1\n\n", environmentLibraryInformation));
+
   // Chip information
   buffer += buffercat(buffer, "# HELP esp32_chip_information ESP32 chip information\n");
   buffer += buffercat(buffer, "# TYPE esp32_chip_information gauge\n");
@@ -478,7 +491,7 @@ void connectMQTT()
     else
     {
       Serial.print("MQTT: Connection failed: ");
-      Serial.println(mqttClient.state());
+      Serial.println(mqttClient.state()); // -1=disconnected, -2=connect failed, -3=connection lost, -4=connection timeout
     }
   }
 }
@@ -500,7 +513,7 @@ void updateMQTT()
   xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
 
   // Light level
-  xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data (calculated on a different thread)
+  xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data
   MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_lux",         "%0.2f", lightSensorLux);
   MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_lux_average", "%0.2f", lightSensorLuxAverage);
   MQTT_PUBLISH(MQTT_TOPIC_BASE "light_level_lux_peak",    "%0.2f", lightSensorLuxPeak);
@@ -509,7 +522,7 @@ void updateMQTT()
   xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
 
   // Environmentals
-  xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
+  xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
   if (environmentSensorReady)
   {
     MQTT_PUBLISH(MQTT_TOPIC_BASE "environmental_temperature",   "%0.1f", BME680_TEMP_F ? environmentTemperature * 9.0F / 5.0F + 32.0F : environmentTemperature);
@@ -541,7 +554,7 @@ void updateMQTT()
   MQTT_PUBLISH(MQTT_TOPIC_BASE "esp32_free_heap_bytes", "%d", ESP.getFreeHeap());
 
   // Battery data and AC power on/off state
-  xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data (calculated on a different thread)
+  xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data
   MQTT_PUBLISH(MQTT_TOPIC_BASE "esp32_battery_voltage", "%0.2f", batteryVoltage);
   MQTT_PUBLISH(MQTT_TOPIC_BASE "esp32_battery_percent", "%0.2f", batteryPercent);
   mqttClient.publish(MQTT_TOPIC_BASE "esp32_ac_power_state", acPowerState ? "1" : "0", true); // 1 for "ON" or 0 for "OFF"
@@ -626,15 +639,15 @@ void updateDataSet()
     // Shift all data streams down by one element. The updates below will overwrite the last element in each stream.
     memmove(psramDataSet, psramDataSet + DATA_ELEMENT_SIZE, DATA_SET_SIZE - DATA_ELEMENT_SIZE);
 
-    xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data (calculated on a different thread)
+    xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data
     addDataElement(0, soundSensorSpl);
     xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
 
-    xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data (calculated on a different thread)
+    xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data
     addDataElement(1, lightSensorLux);
     xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
 
-    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
+    xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
     addDataElement(2, environmentTemperature); // Always in Celsius
     addDataElement(3, environmentHumidity);
     addDataElement(4, environmentPressure);
@@ -705,7 +718,7 @@ void formatLux(char* buffer, float lux)
 void updateDisplay()
 {
   char formatBuffer[40];
-  int64_t seconds = esp_timer_get_time() / 1000000; // Current system clock in seconds, used to flip/flop display data
+  int64_t seconds = systemSeconds(); // Current system clock in seconds, used to flip/flop display data
 
   canvas.fillScreen(ST77XX_BLACK);
   canvas.setFont(&FreeSans9pt7b);
@@ -729,7 +742,14 @@ void updateDisplay()
   canvas.setTextColor(ST77XX_GREEN);
   if (seconds % 2)
   {
-    canvas.printf("IAQ %0.1f VOC %0.1f ppm", environmentIAQ, environmentVOC);
+    if (environmentVOC >= 100.0F)
+    {
+      canvas.printf("IAQ %0.1f VOC %0.0f ppm", environmentIAQ, environmentVOC);
+    }
+    else
+    {
+      canvas.printf("IAQ %0.1f VOC %0.1f ppm", environmentIAQ, environmentVOC);
+    }
   }
   else
   {
@@ -819,17 +839,17 @@ void setupEnvironmentalSensor()
   }
 
   // The callback function will be responsible for receving BSEC data at the specified sample rate
-  bme680.attachCallback(measureEnvironmentals);
+  bme680.attachCallback(bme680Callback);
 
   // BSEC library information
   sprintf(environmentLibraryInformation, "%d.%d.%d.%d", bme680.version.major, bme680.version.minor, bme680.version.major_bugfix, bme680.version.minor_bugfix);
 }
 
 // Environmental data measurement callback for the BME680 BSEC library
-void measureEnvironmentals(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec)
+void bme680Callback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec)
 {
   float t, h, p, iaq, gasRaw, gasPercent, co2, voc;
-  int iaqAccuracy, stabilized;
+  int iaqAccuracy, stabilized, runIn;
 
   if (outputs.nOutputs == ARRAY_LEN(environmentSensorList))
   {
@@ -856,8 +876,9 @@ void measureEnvironmentals(const bme68xData data, const bsecOutputs outputs, Bse
           case BSEC_OUTPUT_STABILIZATION_STATUS:
               stabilized = (int)output.signal; // 0 = ongoing stabilization, 1 = stabilized
               break;
-          //case BSEC_OUTPUT_RUN_IN_STATUS:
-          //    break;
+          case BSEC_OUTPUT_RUN_IN_STATUS:
+              runIn = (int)output.signal; // 0 = ongoing stabilization, 1 = stabilized
+              break;
           case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE:
               t = output.signal; // Celsius
               break;
@@ -884,7 +905,7 @@ void measureEnvironmentals(const bme68xData data, const bsecOutputs outputs, Bse
 
     // If the sensor is stabilized then copy its readings into the global variables
     xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
-    if (stabilized)
+    if (runIn && stabilized)
     {
       environmentSensorReady = true;
       if (environmentPressure == 0)
@@ -932,8 +953,26 @@ void measureEnvironmentals(const bme68xData data, const bsecOutputs outputs, Bse
     else
     {
       environmentSensorReady = false;
+      //Serial.printf("BME680: time = %lld, run in = %d, stabilized = %d", systemSeconds(), runIn, stabilized); Serial.println();
     }
     xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+  }
+}
+
+//
+void measureEnvironmentals(void *parameter)
+{
+  // Setup the BME680 sensor
+  //delay(1000); // Non-blocking delay on ESP32, in milliseconds
+  //setupEnvironmentalSensor();
+
+  // Infinite loop since this is a separate task from the main thread
+  while(true)
+  {
+    xSemaphoreTake(xMutexI2C, portMAX_DELAY); // Start accessing I2C devices
+    bme680.run();
+    xSemaphoreGive(xMutexI2C); // Done with I2C devices
+    delay(7);
   }
 }
 
@@ -961,13 +1000,16 @@ void setupLightSensor()
 // Reference: https://github.com/adafruit/Adafruit_VEML7700/blob/master/examples/veml7700_autolux/veml7700_autolux.ino
 void measureLight()
 {
-  // Read lux using the automatic method which adjusts gain and integration time as needed to obtain
-  // a good reading. A non-linear correction is also applied if needed.
+  // Read lux using the automatic method which adjusts gain and integration time as needed to obtain a good reading. A non-linear correction is also applied if needed.
+  xSemaphoreTake(xMutexI2C, portMAX_DELAY); // Start accessing I2C devices
   float lux = lightSensor.readLux(VEML_LUX_AUTO);
+  uint8_t sensorGain = lightSensor.getGain();
+  uint8_t sensorIntegrationTime = lightSensor.getIntegrationTime();
+  xSemaphoreGive(xMutexI2C); // Done with I2C devices
 
-  // Read the gain and integration time settings from the light sensor
+  // Translate the gain and integration time values
   float gain; 
-  switch (lightSensor.getGain())
+  switch (sensorGain)
   {
     case VEML7700_GAIN_2:   gain = 2;    break;
     case VEML7700_GAIN_1:   gain = 1;    break;
@@ -975,7 +1017,7 @@ void measureLight()
     case VEML7700_GAIN_1_8: gain = .125; break;
   }
   int integrationTime;
-  switch (lightSensor.getIntegrationTime())
+  switch (sensorIntegrationTime)
   {
     case VEML7700_IT_25MS:  integrationTime = 25;  break;
     case VEML7700_IT_50MS:  integrationTime = 50;  break;
@@ -986,7 +1028,7 @@ void measureLight()
   }
 
   // Track peak levels
-  unsigned long timeIndex = (millis() / 1000) % MEASUREMENT_WINDOW; // The time index rotates through the measurement window at the rate of one slot per second
+  int timeIndex = systemSeconds() % MEASUREMENT_WINDOW; // The time index rotates through the measurement window at the rate of one slot per second
   if (timeIndex != lightSensorLastTimeIndex)
   {
     // A new second/slot
@@ -998,11 +1040,22 @@ void measureLight()
     // Subsequent measurement during the same second/slot as the previous measurement
     lightSensorPeakLevels[timeIndex] = max(lightSensorPeakLevels[timeIndex], lux);
   }
-  float peakLux = 0;
+  float minLux = lightSensorPeakLevels[0], peakLux = 0;
   for (int i = 0; i < MEASUREMENT_WINDOW; i++)
   {
+    minLux  = min(minLux,  lightSensorPeakLevels[i]);
     peakLux = max(peakLux, lightSensorPeakLevels[i]);
   }
+
+  // Detect sensor failure
+  /*
+  if (minLux == peakLux && timeIndex >= MEASUREMENT_WINDOW * 9 / 10) // When the sensor gets "stuck", the lux value goes constant, so the peak buffer should be full of the exact same values
+  {
+    Serial.println("Light: Sensor stalled");
+    delay(250);
+    ESP.restart(); // Soft system reset
+  }
+  */
 
   // Update light sensor data values
   xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data
@@ -1043,12 +1096,14 @@ void setupBatteryMonitor()
 // Read the battery voltage using the MAX17048 LiPo battery monitor, and ALSO read the AC power on/off state from a digital input pin
 void measureBattery()
 {
-  // Start accessing the battery data
-  xSemaphoreTake(xMutexBattery, portMAX_DELAY);
-
-  // Read battery voltage
+  // Read battery voltage and percent charge
+  xSemaphoreTake(xMutexI2C, portMAX_DELAY); // Start accessing I2C devices
   float v = max17048.cellVoltage();
   float p = max17048.cellPercent();
+  xSemaphoreGive(xMutexI2C); // Done with I2C devices
+
+  // Update the battery and AC power data values
+  xSemaphoreTake(xMutexBattery, portMAX_DELAY); // Start accessing the battery data
   if (batteryVoltage == 0)
   {
     // Initialize values
@@ -1061,12 +1116,8 @@ void measureBattery()
     batteryVoltage = (batteryVoltage * (MEASUREMENT_WINDOW - 1) + v) / MEASUREMENT_WINDOW;
     batteryPercent = (batteryPercent * (MEASUREMENT_WINDOW - 1) + p) / MEASUREMENT_WINDOW;
   }
-
-  // Read the AC power on/off state from a digital input pin
-  acPowerState = digitalRead(AC_POWER_PIN);
-
-  // Done with battery data
-  xSemaphoreGive(xMutexBattery);
+  acPowerState = digitalRead(AC_POWER_PIN); // Read the AC power on/off state from a digital input pin
+  xSemaphoreGive(xMutexBattery); // Done with battery data
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1086,9 +1137,9 @@ void readI2CDevices(void *parameter)
       // Only read these I2C devices approximately every second, but just SLIGHTLY faster to ensure that light level peak tracking gets enough hits
       measureLight();   // Measure the light level
       measureBattery(); // Read the LiPo battery voltage
-      timer = millis(); // Reset the timeout
+      timer = millis(); // Reset the timer
     }
-    delay(20); // Non-blocking delay on ESP32, in milliseconds
+    delay(25); // Non-blocking delay on ESP32, in milliseconds
   }
 }
 
@@ -1243,6 +1294,14 @@ void setup()
   setupMQTT();
   configTzTime(NTP_TIMEZONE, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3); // NTP
 
+  // Semaphore setup
+  xMutexI2C           = xSemaphoreCreateMutex();
+  xMutexEnvironmental = xSemaphoreCreateMutex();
+  xMutexUptime        = xSemaphoreCreateMutex();
+  xMutexBattery       = xSemaphoreCreateMutex();
+  xMutexSoundSensor   = xSemaphoreCreateMutex();
+  xMutexLightSensor   = xSemaphoreCreateMutex();
+
   // Sensor setup
   delay(200); // Allow the sensor modules time to initialize after powering on
   setupTFT();
@@ -1250,11 +1309,6 @@ void setup()
   setupBatteryMonitor();
   setupSoundSensor();
   setupLightSensor();
-  xMutexEnvironmental = xSemaphoreCreateMutex();
-  xMutexUptime        = xSemaphoreCreateMutex();
-  xMutexBattery       = xSemaphoreCreateMutex();
-  xMutexSoundSensor   = xSemaphoreCreateMutex();
-  xMutexLightSensor   = xSemaphoreCreateMutex();
 
   // Button setup
   // Reference: https://learn.adafruit.com/esp32-s3-reverse-tft-feather/factory-shipped-demo-2
@@ -1295,25 +1349,10 @@ void setup()
 
 void loop()
 {
-  // MQTT connection management
-  if (!mqttClient.connected()) connectMQTT(); else mqttClient.loop();
-
-  // Web server request management
-  webServer.handleClient();
-
-  // Read the BME680 data (does not work as a background task so it needs to be on the main thread)
-  bme680.run();
-  if (bme680.status < BSEC_OK || bme680.sensor.status < BME68X_OK)
-  {
-    logEnvironmentSensorErrors();
-    setupEnvironmentalSensor(); // Reset the BME680
-    delay(50); // Non-blocking delay on ESP32, in milliseconds
-  }
-
   // Uptime calculations: How long has the ESP32 been running since it was booted up?
   xSemaphoreTake(xMutexUptime, portMAX_DELAY); // Start accessing the uptime data
   bool newSecond = false;
-  uptimeSecondsTotal = esp_timer_get_time() / 1000000;
+  uptimeSecondsTotal = systemSeconds();
   if (uptimeSecondsTotal > lastUptimeSecondsTotal)
   {
     newSecond = true;
@@ -1330,8 +1369,23 @@ void loop()
   timer = uptimeSecondsTotal; // Copy the timer so it can be used without the semaphore
   xSemaphoreGive(xMutexUptime); // Done with uptime data
 
-  // Update outputs every specified update interval, and the first-time through the loop
-  bool updateTft  = timer - lastUpdateTimeTft  >= UPDATE_INTERVAL_TFT; // The display can be updated more frequently than MQTT
+  // MQTT connection management
+  if (!mqttClient.connected()) connectMQTT(); else mqttClient.loop();
+
+  // Web server request management
+  webServer.handleClient();
+
+  // Read the BME680 data (does not work as a background task so it needs to be on the main thread)
+  //xSemaphoreTake(xMutexI2C, portMAX_DELAY); // Start accessing I2C devices
+  bme680.run();
+  //xSemaphoreGive(xMutexI2C); // Done with I2C devices
+  if (bme680.status < BSEC_OK || bme680.sensor.status < BME68X_OK)
+  {
+    logEnvironmentSensorErrors();
+  }
+
+  // Update outputs every specified update interval, and usually the first-time through the loop()
+  bool updateTft  = timer - lastUpdateTimeTft >= UPDATE_INTERVAL_TFT;
   if (updateTft || lastUpdateTimeTft == 0)
   {
       // Update the display
@@ -1346,7 +1400,7 @@ void loop()
       lastUpdateTimeMqtt = timer;
   }
   bool updateData = timer - lastUpdateTimeData >= UPDATE_INTERVAL_DATA;
-  if (updateData)
+  if (updateData) // Don't want to capture data the first time through the loop() because there likely won't be any useful data
   {
       // Update the data set
       updateDataSet();
@@ -1365,5 +1419,5 @@ void loop()
   }
 
   // Yield to other tasks, and slow down the main loop a little
-  delay(20); // Non-blocking delay on ESP32, in milliseconds
+  delay(5); // Non-blocking delay on ESP32, in milliseconds
 }
