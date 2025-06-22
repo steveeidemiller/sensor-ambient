@@ -34,23 +34,30 @@ const char htmlHeader[] = R"EOF(
       }
       table.sensor th {
         text-align: left;
-        padding-right: 50px;
+        padding-right: 20px;
       }
       table.sensor td {
-        padding-left: 50px;
+        padding-left: 20px;
         text-align: right;
       }
-      table.sensor tr.light {
+      table.sensor tr.subheader {
+        background-color: #8080FF;
+      }
+      table.sensor tr.subheader td {
+        font-weight: bold;
+        text-align: right;
+      }
+      table.sensor tr.soundlight {
         background-color: #E8E8FF;
       }
-      table.sensor tr.environmental {
-        background-color: #D0D0FF;
-      }
       table.sensor tr.system {
-        background-color: #B8B8FF;
+        background-color: #C8C8FF;
+      }
+      table.sensor tr.network {
+        background-color: #A8A8FF;
       }
       table.sensor tr.chip {
-        background-color: #A0A0FF;
+        background-color: #9090FF;
       }
       a, a:visited {
         color: blue;
@@ -76,7 +83,7 @@ const char htmlHeader[] = R"EOF(
       var jsonData;
       var esp32Time = %lld;
       var tempUnits = '%s';
-      var chart1 = null, chart2 = null, chart3;
+      var chart1 = null, chart2 = null, chart3 = null;
 
       var sensorChartData = {
         datasets: [
@@ -151,9 +158,9 @@ const char htmlHeader[] = R"EOF(
             label: 'Dew Point (' + tempUnits + ')',
             borderColor: '#00CC00',
             backgroundColor: '#00CC00',
-            yAxisID: 'yD', // Change to 'yT' to share the Temperature axis, then remove the 'yD' definition in 'scales' below
+            yAxisID: 'yT',
             pointRadius: 1,
-            hidden: true // Initially hide the dew point graph to keep the chart from looking too busy
+            hidden: true // Initially hide the dew point graph to keep the chart from looking too busy and to allow better scaling on the temperature graph
           },
           {
             label: 'Humidity (%%)', // Need double percent symbols because of sprintf() in the C code
@@ -195,13 +202,6 @@ const char htmlHeader[] = R"EOF(
               position: 'right',
               ticks: { color: 'red' }
             },
-            yD: {
-              type: 'linear',
-              display: true,
-              position: 'right',
-              ticks: { color: '#00CC00' },
-              grid: { drawOnChartArea: false }
-            },
             yH: {
               type: 'linear',
               display: true,
@@ -223,14 +223,14 @@ const char htmlHeader[] = R"EOF(
             pointRadius: 1
           },
           {
-            label: 'CO2 (ppm)',
+            label: 'Gas (kOhm)',
             borderColor: 'cyan',
             backgroundColor: 'cyan',
             yAxisID: 'yC',
             pointRadius: 1
           },
           {
-            label: 'VOC (ppm)',
+            label: 'Gas Accuracy (%%)',
             borderColor: 'purple',
             backgroundColor: 'purple',
             yAxisID: 'yV',
@@ -289,7 +289,7 @@ const char htmlHeader[] = R"EOF(
         .then(html => {
           document.getElementById('dashboard').replaceWith(document.createRange().createContextualFragment(html));
         });
-	    };
+      };
 
       var updateData = function()
       {
@@ -301,16 +301,17 @@ const char htmlHeader[] = R"EOF(
           jsonData = JSON.parse('[' + data.trim().slice(0,-1) + ']'); // slice() removes the trailing comma
           if (jsonData.length)
           {
-            var streamLength = jsonData.length / 9; // There are nine data streams
+            var streamLength = jsonData.length / 10; // There are ten data streams
             var sound        = jsonData.slice(0               , streamLength);
             var light        = jsonData.slice(streamLength    , streamLength * 2);
-            var temperature  = jsonData.slice(streamLength * 2, streamLength * 3); // Always in Celsius
+            var temperature  = jsonData.slice(streamLength * 2, streamLength * 3);
             var humidity     = jsonData.slice(streamLength * 3, streamLength * 4);
-            var pressure     = jsonData.slice(streamLength * 4, streamLength * 5);
-            var iaq          = jsonData.slice(streamLength * 5, streamLength * 6);
-            var co2          = jsonData.slice(streamLength * 6, streamLength * 7);
-            var voc          = jsonData.slice(streamLength * 7, streamLength * 8);
-            var timeIndex    = jsonData.slice(streamLength * 8, streamLength * 9);
+            var dewPoint     = jsonData.slice(streamLength * 4, streamLength * 5);
+            var pressure     = jsonData.slice(streamLength * 5, streamLength * 6);
+            var iaq          = jsonData.slice(streamLength * 6, streamLength * 7);
+            var gas          = jsonData.slice(streamLength * 7, streamLength * 8);
+            var gasAccuracy  = jsonData.slice(streamLength * 8, streamLength * 9);
+            var timeIndex    = jsonData.slice(streamLength * 9, streamLength * 10);
 
             // Convert the ESP32 timestamps to local time in the browser
             var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -319,21 +320,6 @@ const char htmlHeader[] = R"EOF(
             {
               var date = new Date(now - (esp32Time - timeIndex[i]) * 1000);
               timeIndex[i] = days[date.getDay()] + ' ' + date.toLocaleDateString().slice(0,-5) + ' ' + date.toLocaleTimeString();
-            }
-
-            // Calculate dew point and convert temperature[]  to Fahrenheit if needed
-            var dewPoint = [];
-            for (var i = 0; i < temperature.length; i++)
-            {
-              var t = temperature[i]; // Celsius
-              var magnusGammaTRH = Math.log(humidity[i] / 100.0) + 17.625 * t / (243.04 + t);
-              var d = 243.04 * magnusGammaTRH / (17.625 - magnusGammaTRH);
-              if (tempUnits == 'F')
-              {
-                d = d * 9.0 / 5.0 + 32.0;
-                temperature[i] = t * 9.0 / 5.0 + 32.0;
-              }
-              dewPoint.push(d);
             }
 
             sensorChartData.labels = timeIndex;
@@ -348,8 +334,8 @@ const char htmlHeader[] = R"EOF(
 
             iaqChartData.labels = timeIndex;
             iaqChartData.datasets[0].data = iaq;
-            iaqChartData.datasets[1].data = co2;
-            iaqChartData.datasets[2].data = voc;
+            iaqChartData.datasets[1].data = gas;
+            iaqChartData.datasets[2].data = gasAccuracy;
 
             if (chart1 == null)
             {
@@ -395,9 +381,9 @@ const char htmlHeader[] = R"EOF(
   <body>
 )EOF";
 const char htmlFooter[] = R"EOF(
-    <div class="chartContainer">Click on captions to enable/disable graphs<br/><canvas class="chart" id="chartSoundLight"></canvas></div>
     <div class="chartContainer">Click on captions to enable/disable graphs<br/><canvas class="chart" id="chartEnvironmentals"></canvas></div>
     <div class="chartContainer">Click on captions to enable/disable graphs<br/><canvas class="chart" id="chartIAQ"></canvas></div>
+    <div class="chartContainer">Click on captions to enable/disable graphs<br/><canvas class="chart" id="chartSoundLight"></canvas></div>
   </body>
 </html>
 )EOF";
