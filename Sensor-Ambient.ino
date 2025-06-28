@@ -184,10 +184,10 @@ char* webFormatIAQAccuracy(int a)
 char* webRenderMeasurementValues(char* buffer, char* description, char* format, MeasurementTracker& measurement)
 {
   buffer += buffercat(buffer, description); // Start of table row
-  buffer += bytesAdded(sprintf(buffer, format, measurement.current));
   buffer += bytesAdded(sprintf(buffer, format, measurement.min));
-  buffer += bytesAdded(sprintf(buffer, format, measurement.average));
   buffer += bytesAdded(sprintf(buffer, format, measurement.max));
+  buffer += bytesAdded(sprintf(buffer, format, measurement.average));
+  buffer += bytesAdded(sprintf(buffer, format, measurement.current));
   buffer += buffercat(buffer, "</tr>"); // Close the table row 
   return buffer;
 }
@@ -200,7 +200,7 @@ char* webRenderDashboard(char* buffer)
 
   buffer += buffercat(buffer, "<table id=\"dashboard\" class=\"sensor\" cellspacing=\"0\" cellpadding=\"3\">"); // Sensor data table
   buffer += bytesAdded(sprintf(buffer, "<tr><th colspan=\"5\" class=\"header\">%s</th></tr>", WIFI_HOSTNAME)); // Network hostname
-  buffer += buffercat(buffer, "<tr class=\"subheader\"><th></th><td>Current</td><td>Min</td><td>Average</td><td>Max</td></tr>");
+  buffer += buffercat(buffer, "<tr class=\"subheader\"><th></th><td>Min</td><td>Max</td><td>Average</td><td>Current</td></tr>");
 
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   if (environmentSensorOK)
@@ -624,33 +624,33 @@ void updateDataSet()
     // Shift all data streams down by one element. The updates below will overwrite the last element in each stream.
     memmove(psramDataSet, psramDataSet + DATA_ELEMENT_SIZE, DATA_SET_SIZE - DATA_ELEMENT_SIZE);
 
-    xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data
-    addDataElement(0, soundSensorSpl.current);
-    xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
-
-    xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data
-    addDataElement(1, lightSensorLux.current);
-    xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
-
     xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data
-    addDataElement(2, environmentTemperature.current);
-    addDataElement(3, environmentHumidity.current);
-    addDataElement(4, environmentDewPoint.current);
-    addDataElement(5, environmentPressure.current);
+    addDataElement(0, environmentTemperature.current);
+    addDataElement(1, environmentHumidity.current);
+    addDataElement(2, environmentDewPoint.current);
+    addDataElement(3, environmentPressure.current);
     if (environmentIAQAccuracy > 0 && !(environmentGasCalibrationStage <= 1 && environmentIAQ.current == 50.0F))
     {
-      addDataElement(6, environmentIAQ.current);
-      addDataElement(7, (float)environmentGasResistance / 1000.0F); // Convert to kiloohms to fit within the PSRAM data slot with fewer digits
-      addDataElement(8, environmentGasAccuracy);
+      addDataElement(4, environmentIAQ.current);
+      addDataElement(5, (float)environmentGasResistance / 1000.0F); // Convert to kiloohms to fit within the PSRAM data slot with fewer digits
+      addDataElement(6, environmentGasAccuracy);
     }
     else
     {
       // Use JavaScript NULL values if the IAQ data is not ready yet (due to initialization)
+      addNullDataElement(4);
+      addNullDataElement(5);
       addNullDataElement(6);
-      addNullDataElement(7);
-      addNullDataElement(8);
     }
     xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+
+    xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing the sound sensor data
+    addDataElement(7, soundSensorSpl.current);
+    xSemaphoreGive(xMutexSoundSensor); // Done with sound sensor data
+
+    xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing the light sensor data
+    addDataElement(8, lightSensorLux.current);
+    xSemaphoreGive(xMutexLightSensor); // Done with light sensor data
 
     addDataElement(9, timer); // Time index
   }
@@ -720,20 +720,6 @@ void updateDisplay()
   canvas.setFont(&FreeSans9pt7b);
   canvas.setCursor(0, 20);
 
-  xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
-  canvas.setTextColor(ST77XX_WHITE);
-  canvas.printf("%0.2f    %0.2f    %0.2f dB", soundSensorSpl.current, soundSensorSpl.average, soundSensorSpl.max);
-  canvas.println();
-  xSemaphoreGive(xMutexSoundSensor); // Done with sound data
-
-  xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
-  canvas.setTextColor(ST77XX_YELLOW);
-  formatLux(formatBuffer, lightSensorLux.current); canvas.print(formatBuffer); canvas.print("  ");
-  formatLux(formatBuffer, lightSensorLux.average); canvas.print(formatBuffer); canvas.print("  ");
-  formatLux(formatBuffer, lightSensorLux.max);     canvas.print(formatBuffer); canvas.print(" lux");
-  canvas.println();
-  xSemaphoreGive(xMutexLightSensor); // Done with light data
-
   xSemaphoreTake(xMutexEnvironmental, portMAX_DELAY); // Start accessing the environmental data (calculated on a different thread)
   canvas.setTextColor(ST77XX_GREEN);
   if (seconds % 2)
@@ -754,6 +740,20 @@ void updateDisplay()
   }
   canvas.println();
   xSemaphoreGive(xMutexEnvironmental); // Done with environmental data
+
+  xSemaphoreTake(xMutexSoundSensor, portMAX_DELAY); // Start accessing sound data (measured on a different thread)
+  canvas.setTextColor(ST77XX_WHITE);
+  canvas.printf("%0.2f    %0.2f    %0.2f dB", soundSensorSpl.current, soundSensorSpl.average, soundSensorSpl.max);
+  canvas.println();
+  xSemaphoreGive(xMutexSoundSensor); // Done with sound data
+
+  xSemaphoreTake(xMutexLightSensor, portMAX_DELAY); // Start accessing light data (measured on a different thread)
+  canvas.setTextColor(ST77XX_YELLOW);
+  formatLux(formatBuffer, lightSensorLux.current); canvas.print(formatBuffer); canvas.print("  ");
+  formatLux(formatBuffer, lightSensorLux.average); canvas.print(formatBuffer); canvas.print("  ");
+  formatLux(formatBuffer, lightSensorLux.max);     canvas.print(formatBuffer); canvas.print(" lux");
+  canvas.println();
+  xSemaphoreGive(xMutexLightSensor); // Done with light data
 
   canvas.setTextColor(ST77XX_MAGENTA);
   if (seconds % 2)
@@ -811,7 +811,7 @@ void setupEnvironmentalSensor()
   // Enable Donchian smoothing to remove oscillations in IAQ due to the cycling of air conditioners, heaters, etc.
   if (BME680_DONCHIAN_ENABLE)
   {
-    bme680.setDonchianSmoothing(true, BME680_DONCHIAN_WINDOW);
+    bme680.setDonchianSmoothing(true, BME680_DONCHIAN_WINDOW, BME680_DONCHIAN_TEMP_RANGE_LIMIT, BME680_DONCHIAN_HUMIDITY_RANGE_LIMIT, BME680_DONCHIAN_GAS_RANGE_LIMIT);
   }
 }
 
@@ -982,27 +982,27 @@ void readI2CDevices(void *parameter)
   unsigned long timer;
 
   // Infinite loop since this is a separate task from the main thread
-  unsigned long interval;
+  //unsigned long interval;
   while (true)
   {
     if (millis() - timer >= I2C_INTERVAL)
     {
       timer = millis(); // Reset the timer
-      interval = millis();
+      //interval = millis();
       if (bme680.performReading()) // Takes about 370ms
       {
         measureEnvironmentals(); // Read the BME680 environmentals
       }
-      interval = millis() - interval;
-      Serial.print("BME680 interval = "); Serial.println(interval);
-      interval = millis();
+      //interval = millis() - interval;
+      //Serial.print("BME680 interval = "); Serial.println(interval);
+      //interval = millis();
       measureLight();   // Measure the light level, takes up to 5118ms whne dark due to auto gain
-      interval = millis() - interval;
-      Serial.print("VEML7700 interval = "); Serial.println(interval);
-      interval = millis();
+      //interval = millis() - interval;
+      //Serial.print("VEML7700 interval = "); Serial.println(interval);
+      //interval = millis();
       measureBattery(); // Read the LiPo battery voltage, takes about 5ms
-      interval = millis() - interval;
-      Serial.print("Battery interval = "); Serial.println(interval);
+      //interval = millis() - interval;
+      //Serial.print("Battery interval = "); Serial.println(interval);
     }
     delay(25); // Non-blocking delay on ESP32, in milliseconds
   }

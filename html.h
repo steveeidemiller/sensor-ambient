@@ -78,64 +78,26 @@ const char htmlHeader[] = R"EOF(
         height: 475px;
       }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!--<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>-->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
     <script>
       var jsonData;
       var esp32Time = %lld;
       var tempUnits = '%s';
       var chart1 = null, chart2 = null, chart3 = null;
 
-      var sensorChartData = {
-        datasets: [
-          {
-            label: 'Sound (dB)',
-            borderColor: 'blue',
-            backgroundColor: 'blue',
-            yAxisID: 'yS',
-            pointRadius: 1
-          },
-          {
-            label: 'Light (lux)',
-            borderColor: 'cyan',
-            backgroundColor: 'cyan',
-            yAxisID: 'yL',
-            pointRadius: 1
-          }
-        ]
-      };
-
-      var sensorChartOptions = {
-        type: 'line',
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          interaction: {
-            mode: 'index',
-            intersect: false,
-          },
-          stacked: false,
-          plugins: {
-            title: {
-              display: false,
-              text: 'Sound and Light'
-            }
-          },
-          scales: {
-            yS: {
-              type: 'linear',
-              display: true,
-              position: 'left',
-              ticks: { color: 'blue' }
-            },
-            yL: {
-              type: 'logarithmic',
-              display: true,
-              position: 'right',
-              ticks: { color: 'cyan' },
-              grid: { drawOnChartArea: false }
-            }
-          }
+      var zoomOptions = {
+        pan: {
+          enabled: false,
+          mode: 'x'
         },
+        zoom: {
+          wheel: { enabled: true },
+          pinch: { enabled: true },
+          mode: 'x'
+        }
       };
 
       var environmentalChartData = {
@@ -186,7 +148,8 @@ const char htmlHeader[] = R"EOF(
             title: {
               display: false,
               text: 'Environmentals'
-            }
+            },
+            zoom: zoomOptions
           },
           scales: {
             yP: {
@@ -253,7 +216,8 @@ const char htmlHeader[] = R"EOF(
             title: {
               display: false,
               text: 'Air Quality'
-            }
+            },
+            zoom: zoomOptions
           },
           scales: {
             yQ: {
@@ -274,6 +238,60 @@ const char htmlHeader[] = R"EOF(
               display: true,
               position: 'right',
               ticks: { color: 'purple' },
+              grid: { drawOnChartArea: false }
+            }
+          }
+        },
+      };
+
+      var sensorChartData = {
+        datasets: [
+          {
+            label: 'Sound (dB)',
+            borderColor: 'blue',
+            backgroundColor: 'blue',
+            yAxisID: 'yS',
+            pointRadius: 1
+          },
+          {
+            label: 'Light (lux)',
+            borderColor: 'cyan',
+            backgroundColor: 'cyan',
+            yAxisID: 'yL',
+            pointRadius: 1
+          }
+        ]
+      };
+
+      var sensorChartOptions = {
+        type: 'line',
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          stacked: false,
+          plugins: {
+            title: {
+              display: false,
+              text: 'Sound and Light'
+            },
+            zoom: zoomOptions
+          },
+          scales: {
+            yS: {
+              type: 'linear',
+              display: true,
+              position: 'left',
+              ticks: { color: 'blue' }
+            },
+            yL: {
+              type: 'logarithmic',
+              display: true,
+              position: 'right',
+              ticks: { color: 'cyan' },
               grid: { drawOnChartArea: false }
             }
           }
@@ -302,15 +320,15 @@ const char htmlHeader[] = R"EOF(
           if (jsonData.length)
           {
             var streamLength = jsonData.length / 10; // There are ten data streams
-            var sound        = jsonData.slice(0               , streamLength);
-            var light        = jsonData.slice(streamLength    , streamLength * 2);
-            var temperature  = jsonData.slice(streamLength * 2, streamLength * 3);
-            var humidity     = jsonData.slice(streamLength * 3, streamLength * 4);
-            var dewPoint     = jsonData.slice(streamLength * 4, streamLength * 5);
-            var pressure     = jsonData.slice(streamLength * 5, streamLength * 6);
-            var iaq          = jsonData.slice(streamLength * 6, streamLength * 7);
-            var gas          = jsonData.slice(streamLength * 7, streamLength * 8);
-            var gasAccuracy  = jsonData.slice(streamLength * 8, streamLength * 9);
+            var temperature  = jsonData.slice(0               , streamLength * 1);
+            var humidity     = jsonData.slice(streamLength * 1, streamLength * 2);
+            var dewPoint     = jsonData.slice(streamLength * 2, streamLength * 3);
+            var pressure     = jsonData.slice(streamLength * 3, streamLength * 4);
+            var iaq          = jsonData.slice(streamLength * 4, streamLength * 5);
+            var gas          = jsonData.slice(streamLength * 5, streamLength * 6);
+            var gasAccuracy  = jsonData.slice(streamLength * 6, streamLength * 7);
+            var sound        = jsonData.slice(streamLength * 7, streamLength * 8);
+            var light        = jsonData.slice(streamLength * 8, streamLength * 9);
             var timeIndex    = jsonData.slice(streamLength * 9, streamLength * 10);
 
             // Convert the ESP32 timestamps to local time in the browser
@@ -339,8 +357,8 @@ const char htmlHeader[] = R"EOF(
 
             if (chart1 == null)
             {
-              sensorChartOptions.data = sensorChartData;
-              chart1 = new Chart(document.getElementById('chartSoundLight'), sensorChartOptions);
+              environmentalChartOptions.data = environmentalChartData;
+              chart1 = new Chart(document.getElementById('chartEnvironmentals'), environmentalChartOptions);
             }
             else
             {
@@ -348,8 +366,8 @@ const char htmlHeader[] = R"EOF(
             }
             if (chart2 == null)
             {
-              environmentalChartOptions.data = environmentalChartData;
-              chart2 = new Chart(document.getElementById('chartEnvironmentals'), environmentalChartOptions);
+              iaqChartOptions.data = iaqChartData;
+              chart2 = new Chart(document.getElementById('chartIAQ'), iaqChartOptions);
             }
             else
             {
@@ -357,8 +375,8 @@ const char htmlHeader[] = R"EOF(
             }
             if (chart3 == null)
             {
-              iaqChartOptions.data = iaqChartData;
-              chart3 = new Chart(document.getElementById('chartIAQ'), iaqChartOptions);
+              sensorChartOptions.data = sensorChartData;
+              chart3 = new Chart(document.getElementById('chartSoundLight'), sensorChartOptions);
             }
             else
             {
