@@ -1117,7 +1117,7 @@ void setup()
 {
   // Serial port for debugging purposes
   Serial.begin(115200);
-  while (!Serial) delay(10); // Wait for the console to initialize
+  //while (!Serial) delay(10); // Do NOT wait for the console to initialize because it will spin forever if not hooked up to a computer
 
   // Allocate a large PSRAM buffer for long-term data storage, before any other setup that might try and use PSRAM
   setupPsram();

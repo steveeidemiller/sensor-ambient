@@ -47,10 +47,10 @@ This solution is based on the ESP32-S3 Reverse TFT Feather from Adafruit. The de
     git clone https://github.com/steveeidemiller/sensor-ambient.git
     ```
 - Copy the `config.example.h` configuration file to `config.h` and edit all values to suit the deployment scenario
-- Using the Arduino IDE, upload the main sketch and configuration to the ESP32-S3 Feather: [Flashing instructions may be a little different from other ESP32 devices](https://learn.adafruit.com/esp32-s3-reverse-tft-feather/using-with-arduino-ide)
+- Using the Arduino IDE, upload the main sketch and configuration to the ESP32-S3 Feather: [Flashing instructions may be a little different from other ESP32 devices](https://learn.adafruit.com/esp32-s3-reverse-tft-feather/using-with-arduino-ide#launch-esp32-s2-slash-s3-rom-bootloader-3077453)
 - Verify sensor function by using the HTTP status page
 
-## Wiring
+# Wiring
 [![Wiring Diagram](assets/wiring-diagram-thumbnail.png)](assets/wiring-diagram.png)<br/>
 The BME680 and VEML7700 can be connected with the two Stemma QT cables.
 
@@ -58,7 +58,7 @@ Headers are not needed for this project and if used may actually interfere with 
 
 The LiPo battery connector MUST be checked for polarity. Many LiPo batteries do not have the correct polarity for the ESP32 module used in this project. They often have the red and black reversed. The JST connectors are designed to allow removal and reinsertion of the pings, so changing the polarity should be straightforward without damaging the connector. It is recommended to plug the battery in last, once the ESP32 has been programmed.
 
-## Configuration Notes
+# Configuration
 The project must be properly configured before use. First, copy the `config.example.h` file to a new file named `config.h` and edit all values to suit the deployment scenario per the notes listed here. There are a lot of settings, but default values can be used for many of them.
 
 ```cpp
@@ -159,18 +159,32 @@ Your CA cert
 ```
 This block configures MQTT access.
 
-## Software Installation
-TODO
+# Software Installation
+With the configuration file complete and the circuit built and mounted, the ESP32 can be flashed. Ensure that the ESP32-S3 device support and all dependent libraries for this project are installed within the Arduino IDE, and then follow the (Adafruit instructions to flash the device)[https://learn.adafruit.com/esp32-s3-reverse-tft-feather/using-with-arduino-ide#launch-esp32-s2-slash-s3-rom-bootloader-3077453]. Basically, the first time the device is flashed, it may need to be placed into bootloader mode. To do that, HOLD DOWN the D0 button while you click Reset. After Reset is clicked, then release D0 button. Generally, this is only needed for the first flash, and every subsequent flash from the Arduino IDE should work as normal.
 
-### Library Dependencies
-TODO
+## Library Dependencies
+```cpp
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>     // MQTT TLS support
+#include <PubSubClient.h>         // MQTT support from knolleary
+#include <ESPmDNS.h>              // mDNS support
+#include <WebServer.h>            // HTTP web server support
+#include <driver/i2s.h>           // I2S support for SPH0645 sound sensor
+#include <Adafruit_MAX1704X.h>    // LiPo battery support
+#include <Adafruit_VEML7700.h>    // VEML7700 ambient light sensor support
+#include <Adafruit_ST7789.h>      // TFT display support
+#include <Fonts/FreeSans9pt7b.h>  // TFT display support
+#include <SE_BME680.h>            // BME680 support
+#include <hal/efuse_hal.h>        // Espressif ESP32 chip information
+#include <time.h>                 // NTP and time support
+```
 
-### Uploading
-TODO
+# 3D Printed Mount
+STL files are provided for a simple project mount. ABS filament printed with standard Voron settings is recommended, although other common filaments and print settings should work just fine. 
 
-## 3D Printed Mount
-TODO
-NOTE: may not work well with the ESP variant using a w.FL antenna
+NOTE: The provided mount may not work well with the w.FL antenna variant of the ESP32-S3 Reverse TFT Feather
 
 # License
 This project is licensed under the [MIT License](LICENSE).

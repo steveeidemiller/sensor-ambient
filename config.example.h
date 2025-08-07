@@ -34,8 +34,8 @@ IPAddress webAllowedClients[] = {
 #define BME680_TEMP_OFFSET -2.00F // Celsius temperature offset for BME680. Adjust until temperature readings stabilize and match a known reference.
 #define BME680_DONCHIAN_ENABLE               true     // Whether Donchian smoothing is enabled for IAQ
 #define BME680_DONCHIAN_WINDOW               800      // Donchian smoothing period in number of I2C_INTERVAL polling cycles (default is 6 seconds X this value = smoothing period in seconds)
-#define BME680_DONCHIAN_TEMP_RANGE_LIMIT     2.5F     // Donchian range limit for temperature (only used in IAQ calculation)
-#define BME680_DONCHIAN_HUMIDITY_RANGE_LIMIT 3.5F     // Donchian range limit for humidity (only used in IAQ calculation)
+#define BME680_DONCHIAN_TEMP_RANGE_LIMIT     2.5F     // Donchian range limit for temperature in Celsius (only used in IAQ calculation)
+#define BME680_DONCHIAN_HUMIDITY_RANGE_LIMIT 3.5F     // Donchian range limit for humidity in degrees RH (only used in IAQ calculation)
 #define BME680_DONCHIAN_GAS_RANGE_LIMIT      12500.0F // Donchian range limit for gas resistance (only used in IAQ calculation)
 
 // SPH0645 I2S sound sensor configuration
